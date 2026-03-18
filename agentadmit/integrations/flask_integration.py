@@ -116,40 +116,43 @@ class AgentAdmitFlask:
         return None
 
     def _validate_agent_token(self, token: str) -> dict:
-        """Validate an ag_at_ token and return agent context."""
+        """Validate an ag_at_ token via mandatory introspection."""
         if not token.startswith(self.config.token_prefix_access):
             raise ValueError("Not an AgentAdmit access token")
 
-        raw = token[len(self.config.token_prefix_access):]
-        pub_key = load_public_key(self.config.public_key_path)
+        # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service
+        import requests as _requests
 
-        payload = pyjwt.decode(
-            raw, pub_key,
-            algorithms=[self.config.algorithm],
-            audience=self.config.audience,
-        )
-
-        claims = payload.get("agentadmit", {})
-        conn_id = claims.get("connection_id")
-        scopes = claims.get("scopes", [])
-        user_id = payload.get("sub")
-
-        if not conn_id or not user_id:
-            raise ValueError("Missing required claims")
-
-        connection = self.storage.get_active_connection(conn_id)
-        if not connection:
-            raise ValueError("Connection revoked or not found")
-
-        user = self.storage.get_user(user_id, self.config.user_lookup_field)
-        if not user:
-            raise ValueError("User not found")
-
-        # Update last_used
         try:
-            self.storage.update_connection(conn_id, {"last_used": datetime.utcnow()})
-        except Exception:
-            pass
+            resp = _requests.post(
+                self.config.agentadmit_verify_url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-App-Id": self.config.app_id,
+                    "X-Api-Key": self.config.api_key,
+                },
+                timeout=5,
+            )
+        except _requests.exceptions.RequestException as exc:
+            raise ValueError(f"Introspection failed: {exc}")
+
+        if resp.status_code == 401:
+            err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
+            raise ValueError(err_data.get("error_description", "Token validation failed"))
+
+        if resp.status_code != 200:
+            raise ValueError(f"Verification service returned {resp.status_code}")
+
+        data = resp.json()
+        scopes = data.get("scopes", [])
+        user_id = data.get("user_id")
+        connection_id = data.get("connection_id")
+
+        if not user_id:
+            raise ValueError("Introspection returned no user")
+
+        user = self.storage.get_user(user_id, self.config.user_lookup_field) or {"user_id": user_id}
+        connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": data.get("agent_label", "Unknown Agent")}
 
         return {"user": user, "connection": connection, "scopes": scopes}
 
