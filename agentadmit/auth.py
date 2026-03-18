@@ -103,90 +103,59 @@ def get_agentadmit_user(
 
     raw_token = token[len(config.token_prefix_access):]
 
-    # Load public key
+    # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service
+    # No local JWT decode. Every verification call goes through AgentAdmit.
+    # This is how we meter usage, seed the marketplace, and enforce billing.
+    import requests as _requests
+
     try:
-        public_key = load_public_key(config.public_key_path)
-    except ConfigurationError:
-        logger.error("AGENTADMIT_PUBLIC_KEY not available — cannot validate tokens")
+        verify_response = _requests.post(
+            config.agentadmit_verify_url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-App-Id": config.app_id,
+                "X-Api-Key": config.api_key,
+            },
+            timeout=5,
+        )
+    except _requests.exceptions.RequestException as exc:
+        logger.error("AgentAdmit introspection failed (network): %s", exc)
         raise HTTPException(
-            status_code=500,
-            detail={"error": "server_error", "error_description": "Token validation not configured on server"},
+            status_code=502,
+            detail={"error": "introspection_failed", "error_description": "Could not reach AgentAdmit verification service"},
         )
 
-    # JWT decode and verify
-    try:
-        payload = jwt.decode(
-            raw_token,
-            public_key,
-            algorithms=[config.algorithm],
-            audience=config.audience,
-        )
-    except jwt.ExpiredSignatureError:
-        # Try to mark connection as expired (best-effort)
-        try:
-            expired_payload = jwt.decode(
-                raw_token, public_key,
-                algorithms=[config.algorithm],
-                audience=config.audience,
-                options={"verify_exp": False},
-            )
-            conn_id = expired_payload.get("agentadmit", {}).get("connection_id")
-            if conn_id:
-                storage.update_connection(conn_id, {"status": "expired"})
-        except Exception:
-            pass
-
+    if verify_response.status_code == 401:
         raise HTTPException(
             status_code=401,
-            detail={"error": "invalid_token", "error_description": "Access token has expired — request a new connection token from the user"},
+            detail=verify_response.json() if verify_response.headers.get("content-type", "").startswith("application/json") else {"error": "invalid_token", "error_description": "Token validation failed"},
         )
-    except jwt.InvalidAudienceError:
+
+    if verify_response.status_code != 200:
+        logger.error("AgentAdmit introspection returned %d: %s", verify_response.status_code, verify_response.text)
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "introspection_failed", "error_description": f"Verification service returned {verify_response.status_code}"},
+        )
+
+    introspection_data = verify_response.json()
+
+    # Extract validated data from introspection response
+    scopes = introspection_data.get("scopes", [])
+    user_id = introspection_data.get("user_id")
+    connection_id = introspection_data.get("connection_id")
+
+    if not user_id:
         raise HTTPException(
             status_code=401,
-            detail={"error": "invalid_token", "error_description": "Token audience mismatch"},
-        )
-    except jwt.InvalidTokenError as exc:
-        logger.warning("AgentAdmit JWT validation failed: %s", exc)
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "invalid_token", "error_description": "Invalid access token"},
+            detail={"error": "invalid_token", "error_description": "Introspection returned no user"},
         )
 
-    # Extract custom claims
-    agentadmit_claims = payload.get("agentadmit", {})
-    connection_id = agentadmit_claims.get("connection_id")
-    scopes = agentadmit_claims.get("scopes", [])
-    user_id = payload.get("sub")
+    # User lookup from app's local database
+    user = storage.get_user(user_id, config.user_lookup_field) if storage else None
+    connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": introspection_data.get("agent_label", "Unknown Agent")}
 
-    if not connection_id or not user_id:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "invalid_token", "error_description": "Token is missing required claims"},
-        )
-
-    # Connection status check
-    connection = storage.get_active_connection(connection_id)
-    if not connection:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "connection_revoked", "error_description": "This agent connection has been revoked or does not exist"},
-        )
-
-    # User lookup
-    user = storage.get_user(user_id, config.user_lookup_field)
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail={"error": "invalid_token", "error_description": "User account not found"},
-        )
-
-    # Update last_used (best-effort)
-    try:
-        storage.update_connection(connection_id, {"last_used": datetime.utcnow()})
-    except Exception as exc:
-        logger.warning("Failed to update last_used for connection %s: %s", connection_id, exc)
-
-    return {"user": user, "connection": connection, "scopes": scopes}
+    return {"user": user or {"user_id": user_id}, "connection": connection, "scopes": scopes}
 
 
 # ---------------------------------------------------------------------------

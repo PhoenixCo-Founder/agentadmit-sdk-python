@@ -63,9 +63,15 @@ class AgentAdmitConfig(BaseModel):
     app_id: str = ""
     api_base_url: str = ""       # e.g., "https://api.myapp.com"
 
-    # Keys
-    private_key_path: str = "keys/agentadmit_private.pem"
-    public_key_path: str = "keys/agentadmit_public.pem"
+    # Hosted service connection (REQUIRED — no self-hosted mode)
+    agentadmit_api_url: str = "https://api.agentadmit.app"
+    agentadmit_verify_url: str = "https://api.agentadmit.io/v1/verify"
+    api_key: str = ""  # aa_live_xxxx or aa_test_xxxx — from AgentAdmit dashboard
+
+    # Keys (managed by AgentAdmit — app owner does NOT generate these)
+    # Only used internally by the SDK for hosted service communication
+    private_key_path: str = ""  # Not used in hosted mode — AgentAdmit holds the keys
+    public_key_path: str = ""   # Not used in hosted mode — validation via introspection
 
     # Token settings
     token_prefix_connection: str = "ag_ct_"

@@ -69,18 +69,11 @@ class AgentAdmitMiddleware(BaseHTTPMiddleware):
         config = load_config(config_path)
         logger.info("AgentAdmit SDK v0.1 initialized: %s (%d scopes)", config.app_name, len(config.scopes))
 
-        # Auto-generate keys if needed
-        if auto_generate_keys:
-            try:
-                load_private_key(config.private_key_path)
-                load_public_key(config.public_key_path)
-                logger.info("AgentAdmit keys loaded from %s", config.private_key_path)
-            except Exception:
-                logger.info("Generating AgentAdmit RS256 key pair...")
-                import os
-                keys_dir = os.path.dirname(config.private_key_path) or "keys"
-                generate_key_pair(keys_dir)
-                logger.info("Keys generated in %s/", keys_dir)
+        # Verify hosted service credentials
+        if not config.app_id:
+            logger.warning("AgentAdmit app_id not set. Get it from your AgentAdmit dashboard.")
+        if not config.api_key:
+            logger.warning("AgentAdmit api_key not set. Get it from your AgentAdmit dashboard.")
 
         # Initialize storage
         storage = create_storage(config)
