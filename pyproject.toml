@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentadmit"
+version = "0.1.0"
+description = "AgentAdmit SDK — User-mediated AI agent authorization for any app"
+readme = "README.md"
+license = {text = "All rights reserved"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Christopher Emerson"},
+]
+
+dependencies = [
+    "fastapi>=0.100.0",
+    "PyJWT>=2.8.0",
+    "cryptography>=41.0.0",
+    "PyYAML>=6.0",
+    "pymongo>=4.0.0",
+    "pydantic>=2.0.0",
+    "starlette>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "httpx>=0.24.0",
+    "uvicorn>=0.23.0",
+]
+
+[project.scripts]
+agentadmit = "agentadmit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["agentadmit*"]
