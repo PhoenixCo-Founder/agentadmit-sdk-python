@@ -64,8 +64,8 @@ class AgentAdmitConfig(BaseModel):
     api_base_url: str = ""       # e.g., "https://api.myapp.com"
 
     # Hosted service connection (REQUIRED — no self-hosted mode)
-    agentadmit_api_url: str = "https://api.agentadmit.app"
-    agentadmit_verify_url: str = "https://api.agentadmit.io/v1/verify"
+    agentadmit_api_url: str = "https://api.agentadmit.com"
+    agentadmit_verify_url: str = "https://api.agentadmit.com/v1/verify"
     api_key: str = ""  # aa_live_xxxx or aa_test_xxxx — from AgentAdmit dashboard
 
     # Keys (managed by AgentAdmit — app owner does NOT generate these)
