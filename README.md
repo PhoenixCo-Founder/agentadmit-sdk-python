@@ -1,6 +1,6 @@
 # AgentAdmit SDK for Python
 
-User-mediated AI agent authorization. Plug-and-play for any FastAPI app.
+User-mediated AI agent authorization for Python apps. Supports **FastAPI**, **Flask**, and **Django**.
 
 ## Quick Start
 
@@ -61,6 +61,39 @@ The token goes to the human, not the agent. No automated delivery = no prompt in
 agentadmit init      # Generate config and keys
 agentadmit keys      # Regenerate RS256 key pair
 agentadmit check     # Validate configuration
+```
+
+## Flask Integration
+
+```python
+from flask import Flask
+from agentadmit.flask import AgentAdmitMiddleware
+
+app = Flask(__name__)
+agentadmit = AgentAdmitMiddleware(app)
+
+@app.route('/api/orders')
+@agentadmit.require_scope('read:orders')
+def get_orders():
+    return get_user_orders()
+```
+
+## Django Integration
+
+```python
+# settings.py
+AGENTADMIT = {
+    'APP_ID': 'app_yourappid',
+    'API_KEY': 'ak_test_yourkey',
+    'VERIFY_URL': 'https://api.agentadmit.com/v1/verify',
+}
+
+# views.py
+from agentadmit.django import require_scope
+
+@require_scope('read:orders')
+def get_orders(request):
+    return get_user_orders(request)
 ```
 
 ## Important
