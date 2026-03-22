@@ -96,6 +96,51 @@ def get_orders(request):
     return get_user_orders(request)
 ```
 
+## MCP Server Integration
+
+Building an MCP server in Python? AgentAdmit is the auth layer. MCP servers are app owners. Same SDK, same pricing.
+
+For **STDIO transport** (most MCP servers), the agent includes the token in tool arguments:
+
+```python
+import requests
+import os
+
+AGENTADMIT_VERIFY_URL = "https://api.agentadmit.com/v1/verify"
+AGENTADMIT_API_KEY = os.environ["AGENTADMIT_API_KEY"]
+
+def handle_tool_call(name: str, arguments: dict) -> dict:
+    # 1. Extract token from tool arguments
+    token = arguments.pop("agentadmit_token", None)
+    if not token:
+        raise PermissionError("agentadmit_token required")
+    
+    # 2. Validate via AgentAdmit hosted service
+    resp = requests.post(
+        AGENTADMIT_VERIFY_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "X-Api-Key": AGENTADMIT_API_KEY,
+        },
+        timeout=5,
+    )
+    if resp.status_code != 200:
+        raise PermissionError("Invalid or expired token")
+    ctx = resp.json()
+    
+    # 3. Check scope for this tool
+    required_scope = SCOPE_MAP.get(name)
+    if required_scope and required_scope not in ctx.get("scopes", []):
+        raise PermissionError(f"Missing scope '{required_scope}'")
+    
+    # 4. Run the tool
+    return TOOL_HANDLERS[name](arguments, ctx)
+```
+
+For **HTTP transport** (FastAPI-based MCP servers), use the full SDK middleware. The agent sends the token via `Authorization: Bearer` header, same as any HTTP API.
+
+Full MCP integration guide with complete before/after examples: `docs.agentadmit.com/mcp`
+
 ## Important
 
 **Mandatory introspection.** All token validation goes through api.agentadmit.com. There is no self-hosted mode. No local JWT validation. No bypass. This is required for security, audit logging, and scope enforcement.
