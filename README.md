@@ -141,6 +141,8 @@ For **HTTP transport** (FastAPI-based MCP servers), use the full SDK middleware.
 
 Full MCP integration guide with complete before/after examples: `docs.agentadmit.com/mcp`
 
+**MCP operators:** You also get the embeddable admin panel with revoke capability, admin scopes for your own AI agent to monitor your server, and full audit trail for billing. See the Admin Revocation and Embeddable Admin Panel sections below.
+
 ## Important
 
 **Mandatory introspection.** All token validation goes through api.agentadmit.com. There is no self-hosted mode. No local JWT validation. No bypass. This is required for security, audit logging, and scope enforcement.
