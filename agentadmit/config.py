@@ -114,6 +114,9 @@ class AgentAdmitConfig(BaseModel):
     # User lookup function name (app provides this)
     user_lookup_field: str = "user_id"  # the field in your users table/collection that matches JWT sub
 
+    # Rate limiting — introspection retry policy
+    max_retries: int = 3  # max retries on 429 before raising RateLimitError
+
 
 # ---------------------------------------------------------------------------
 # Config loading

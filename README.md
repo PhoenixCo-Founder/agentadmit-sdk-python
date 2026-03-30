@@ -153,6 +153,52 @@ Full MCP integration guide with complete before/after examples: `docs.agentadmit
 
 **In-app AI scopes.** If your app has built-in AI features (analysis, plan generation, photo recognition), do not expose those as agent scopes. The user's AI agent can read the raw data and do the analysis itself. Exposing in-app AI endpoints to agents creates double cost.
 
+## Rate Limiting
+
+The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter — no changes needed in your app code.
+
+### Retry behavior
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Initial delay | 1 second | First retry wait |
+| Backoff multiplier | 2× | Doubles each retry |
+| Cap | 30 seconds | Maximum wait per retry |
+| Jitter | 0–500 ms | Random addition to each delay |
+| Max retries | **3** | Configurable |
+
+The SDK also respects the `Retry-After` response header — if present, it overrides the computed backoff delay.
+
+### Configuring max retries
+
+In `agentadmit.yaml`:
+
+```yaml
+max_retries: 5  # default: 3. Set to 0 to disable retries.
+```
+
+### Handling exhausted retries
+
+When all retries are exhausted, the SDK raises `RateLimitError`:
+
+```python
+from agentadmit.exceptions import RateLimitError
+
+try:
+    # Any endpoint protected with require_scope / get_agentadmit_user
+    ...
+except RateLimitError as e:
+    print(f"Rate limited. Retry after {e.retry_after}s")
+    print(f"Limit: {e.limit}, Remaining: {e.remaining}, Reset: {e.reset}")
+    # Return 429 to the caller or queue for retry
+```
+
+`RateLimitError` attributes:
+- `retry_after` — seconds from `Retry-After` header (or `None`)
+- `limit` — `X-RateLimit-Limit` header value (or `None`)
+- `remaining` — `X-RateLimit-Remaining` header value (or `None`)
+- `reset` — `X-RateLimit-Reset` Unix timestamp (or `None`)
+
 ## Documentation
 
 Full integration guide: https://docs.agentadmit.com/getting-started

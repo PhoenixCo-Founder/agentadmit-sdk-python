@@ -51,3 +51,29 @@ class ConfigurationError(AgentAdmitError):
     """SDK is misconfigured — missing keys, bad config file, etc."""
     def __init__(self, message: str = "AgentAdmit SDK configuration error"):
         super().__init__(message)
+
+
+class RateLimitError(AgentAdmitError):
+    """
+    The AgentAdmit introspection endpoint returned 429 Too Many Requests
+    and all retry attempts were exhausted.
+
+    Attributes:
+        retry_after: seconds to wait before retrying (from Retry-After header), or None
+        limit: total request limit for the window (X-RateLimit-Limit), or None
+        remaining: requests remaining in the current window (X-RateLimit-Remaining), or None
+        reset: Unix timestamp when the rate limit window resets (X-RateLimit-Reset), or None
+    """
+    def __init__(
+        self,
+        message: str = "AgentAdmit rate limit exceeded. Max retries exhausted.",
+        retry_after: float | None = None,
+        limit: int | None = None,
+        remaining: int | None = None,
+        reset: int | None = None,
+    ):
+        self.retry_after = retry_after
+        self.limit = limit
+        self.remaining = remaining
+        self.reset = reset
+        super().__init__(message)

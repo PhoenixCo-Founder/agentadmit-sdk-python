@@ -8,6 +8,8 @@ All app-specific references removed — works with any FastAPI app.
 """
 
 import logging
+import random
+import time
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -23,6 +25,7 @@ from agentadmit.exceptions import (
     ConnectionRevokedError,
     ConnectionLimitError,
     ConfigurationError,
+    RateLimitError,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,120 @@ def _get_storage():
     if _storage is None:
         raise ConfigurationError("AgentAdmit storage not initialized. Did you add AgentAdmitMiddleware?")
     return _storage
+
+
+# ---------------------------------------------------------------------------
+# _introspect_with_retry — HTTP call with 429 exponential backoff + jitter
+# ---------------------------------------------------------------------------
+
+def _introspect_with_retry(
+    url: str,
+    token: str,
+    app_id: str,
+    api_key: str,
+    timeout: int = 5,
+    max_retries: int = 3,
+) -> "requests.Response":
+    """
+    POST to the AgentAdmit introspection endpoint with automatic 429 retry.
+
+    Retry policy:
+      - Initial delay: 1 second
+      - Each retry doubles the delay (exponential backoff), capped at 30 seconds
+      - Each delay adds 0–500 ms of random jitter
+      - Honors Retry-After header if present (overrides computed delay)
+      - After max_retries exhausted on 429, raises RateLimitError
+
+    Returns the successful Response object (status 200 or non-429 error).
+    """
+    import requests as _requests
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-App-Id": app_id,
+        "X-Api-Key": api_key,
+    }
+
+    delay = 1.0  # seconds — initial backoff
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = _requests.post(url, headers=headers, timeout=timeout)
+        except _requests.exceptions.RequestException as exc:
+            logger.error("AgentAdmit introspection failed (network): %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "introspection_failed",
+                    "error_description": "Could not reach AgentAdmit verification service",
+                },
+            )
+
+        if response.status_code != 429:
+            return response
+
+        # --- 429 handling ---
+        # Parse rate-limit headers for error context
+        rl_limit = _parse_int_header(response, "X-RateLimit-Limit")
+        rl_remaining = _parse_int_header(response, "X-RateLimit-Remaining")
+        rl_reset = _parse_int_header(response, "X-RateLimit-Reset")
+        retry_after_hdr = _parse_float_header(response, "Retry-After")
+
+        if attempt >= max_retries:
+            # All retries exhausted — raise RateLimitError
+            raise RateLimitError(
+                message=(
+                    f"AgentAdmit rate limit exceeded. "
+                    f"Max retries ({max_retries}) exhausted."
+                ),
+                retry_after=retry_after_hdr,
+                limit=rl_limit,
+                remaining=rl_remaining,
+                reset=rl_reset,
+            )
+
+        # Compute wait time: Retry-After beats exponential backoff
+        wait = retry_after_hdr if retry_after_hdr is not None else min(delay, 30.0)
+        jitter = random.uniform(0, 0.5)  # 0–500 ms
+        wait_total = wait + jitter
+
+        logger.warning(
+            "AgentAdmit introspection rate-limited (attempt %d/%d). "
+            "Retrying in %.2fs (delay=%.1fs, jitter=%.3fs).",
+            attempt + 1,
+            max_retries,
+            wait_total,
+            wait,
+            jitter,
+        )
+
+        time.sleep(wait_total)
+        delay = min(delay * 2, 30.0)  # double for next attempt, cap at 30s
+
+    # Should never be reached
+    raise RuntimeError("Unexpected exit from retry loop")  # pragma: no cover
+
+
+def _parse_int_header(response: "requests.Response", name: str) -> Optional[int]:
+    """Parse an integer HTTP response header, returning None if missing or invalid."""
+    val = response.headers.get(name)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_float_header(response: "requests.Response", name: str) -> Optional[float]:
+    """Parse a float HTTP response header, returning None if missing or invalid."""
+    val = response.headers.get(name)
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -106,24 +223,19 @@ def get_agentadmit_user(
     # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service
     # No local JWT decode. Every verification call goes through AgentAdmit.
     # This is how we meter usage, seed the marketplace, and enforce billing.
-    import requests as _requests
 
+    max_retries = getattr(config, "max_retries", 3)
     try:
-        verify_response = _requests.post(
-            config.agentadmit_verify_url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "X-App-Id": config.app_id,
-                "X-Api-Key": config.api_key,
-            },
+        verify_response = _introspect_with_retry(
+            url=config.agentadmit_verify_url,
+            token=token,
+            app_id=config.app_id,
+            api_key=config.api_key,
             timeout=5,
+            max_retries=max_retries,
         )
-    except _requests.exceptions.RequestException as exc:
-        logger.error("AgentAdmit introspection failed (network): %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail={"error": "introspection_failed", "error_description": "Could not reach AgentAdmit verification service"},
-        )
+    except RateLimitError:
+        raise  # Let RateLimitError propagate as-is for caller to handle
 
     if verify_response.status_code == 401:
         raise HTTPException(
