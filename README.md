@@ -47,7 +47,7 @@ Your app now supports AI agent connections with:
 
 ## How It Works
 
-1. User clicks "AI Agent Access" in your app
+1. User clicks "AgentAdmit" in your app
 2. Selects scopes and connection duration
 3. Gets a token to give to their AI agent
 4. Agent exchanges the token for scoped API access
@@ -67,13 +67,13 @@ agentadmit check     # Validate configuration
 
 ```python
 from flask import Flask
-from agentadmit.flask import AgentAdmitMiddleware
+from agentadmit.integrations.flask_integration import AgentAdmitFlask
 
 app = Flask(__name__)
-agentadmit = AgentAdmitMiddleware(app)
+aa = AgentAdmitFlask(app, config_path="agentadmit.yaml")
 
 @app.route('/api/orders')
-@agentadmit.require_scope('read:orders')
+@aa.require_scope_if_agent('read:orders')
 def get_orders():
     return get_user_orders()
 ```
@@ -84,14 +84,14 @@ def get_orders():
 # settings.py
 AGENTADMIT = {
     'APP_ID': 'app_yourappid',
-    'API_KEY': 'ak_test_yourkey',
+    'API_KEY': 'aa_test_yourkey',
     'VERIFY_URL': 'https://api.agentadmit.com/v1/verify',
 }
 
 # views.py
-from agentadmit.django import require_scope
+from agentadmit.integrations.django_integration import require_scope_if_agent
 
-@require_scope('read:orders')
+@require_scope_if_agent('read:orders')
 def get_orders(request):
     return get_user_orders(request)
 ```
@@ -139,7 +139,7 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
 
 For **HTTP transport** (FastAPI-based MCP servers), use the full SDK middleware. The agent sends the token via `Authorization: Bearer` header, same as any HTTP API.
 
-Full MCP integration guide with complete before/after examples: `docs.agentadmit.com/mcp`
+Full MCP integration guide with complete before/after examples: `agentadmit.com/docs/mcp-guide`
 
 **MCP operators:** You also get the embeddable admin panel with revoke capability, admin scopes for your own AI agent to monitor your server, and full audit trail for billing. See the Admin Revocation and Embeddable Admin Panel sections below.
 
@@ -201,7 +201,7 @@ except RateLimitError as e:
 
 ## Documentation
 
-Full integration guide: https://docs.agentadmit.com/getting-started
+Full integration guide: https://agentadmit.com/docs/app-owner-guide
 
 ## License
 

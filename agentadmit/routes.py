@@ -264,7 +264,7 @@ def create_agentadmit_router(
         # Generate self-describing token
         exchange_url = f"{config.api_base_url.rstrip('/')}{config.route_prefix}/token"
         url_part = base64.urlsafe_b64encode(exchange_url.encode()).decode().rstrip("=")
-        secret_part = secrets.token_urlsafe(24)
+        secret_part = secrets.token_urlsafe(32)  # 256 bits of cryptographic entropy (industry benchmark)
         raw_token = f"{config.token_prefix_connection}{url_part}.{secret_part}"
 
         now = datetime.utcnow()

@@ -297,7 +297,7 @@ def require_scope(scope: str):
                     "error": "insufficient_scope",
                     "required_scope": scope,
                     "granted_scopes": granted_scopes,
-                    "message": f"This action requires '{scope}' scope. The user can grant additional scopes through the AI Agent Access settings.",
+                    "message": f"This action requires '{scope}' scope. The user can grant additional scopes through AgentAdmit settings.",
                 },
             )
 
@@ -352,7 +352,7 @@ def require_scope_if_agent(scope: str):
                     "error": "insufficient_scope",
                     "required_scope": scope,
                     "granted_scopes": granted_scopes,
-                    "message": f"This action requires '{scope}' scope. The user can grant additional scopes through the AI Agent Access settings.",
+                    "message": f"This action requires '{scope}' scope. The user can grant additional scopes through AgentAdmit settings.",
                 },
             )
 

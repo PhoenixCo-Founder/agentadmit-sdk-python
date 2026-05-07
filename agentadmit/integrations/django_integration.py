@@ -352,7 +352,7 @@ def generate_token_view(request):
 
     exchange_url = f"{_config.api_base_url.rstrip('/')}{_config.route_prefix}/token"
     url_part = base64.urlsafe_b64encode(exchange_url.encode()).decode().rstrip("=")
-    secret_part = secrets.token_urlsafe(24)
+    secret_part = secrets.token_urlsafe(32)  # 256 bits of cryptographic entropy (industry benchmark)
     raw_token = f"{_config.token_prefix_connection}{url_part}.{secret_part}"
 
     now = datetime.utcnow()
