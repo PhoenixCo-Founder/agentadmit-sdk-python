@@ -203,6 +203,27 @@ except RateLimitError as e:
 
 Full integration guide: https://agentadmit.com/docs/app-owner-guide
 
+
+## Data Collection & Privacy
+
+The AgentAdmit Python SDK runs server-side and does not interact with app stores or end-user devices directly.
+
+### What the SDK does
+- Validates AgentAdmit tokens presented by AI agents
+- Enforces scope-based access control on your API routes
+- Manages connection lifecycle (create, revoke, audit)
+
+### What the SDK does NOT do
+- Does not collect end-user data
+- Does not send telemetry or analytics
+- Does not phone home to AgentAdmit servers (all operations use your configured keys and storage)
+- Does not track users or devices
+
+### Privacy impact
+Since this SDK runs on your server, it has no direct App Store or Play Store compliance surface. Your client-side integration (e.g., the AgentAdmit React SDK) handles privacy manifest and data safety requirements.
+
+For complete compliance guidance, see our [compliance guide](https://agentadmit.com/docs/compliance).
+
 ## License
 
 All rights reserved. Patent pending.
