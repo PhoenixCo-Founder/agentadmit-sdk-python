@@ -250,16 +250,23 @@ class MemoryStorage(StorageBackend):
 
 
 def create_storage(config) -> StorageBackend:
-    """Factory: create the appropriate storage backend from config."""
-    backend = config.storage.backend
+    """Factory: create the appropriate storage backend from config.
+    
+    Args:
+        config: Either an AgentAdmitConfig (full config) or StorageConfig.
+               Accepts both for convenience.
+    """
+    # Accept either full config or just the storage config
+    storage_config = getattr(config, 'storage', config)
+    backend = storage_config.backend
 
     if backend == "mongodb":
         storage = MongoDBStorage(
-            uri=config.storage.uri,
-            database=config.storage.database,
-            connections_collection=config.storage.connections_collection,
-            audit_log_collection=config.storage.audit_log_collection,
-            tokens_collection=config.storage.tokens_collection,
+            uri=storage_config.uri,
+            database=storage_config.database,
+            connections_collection=storage_config.connections_collection,
+            audit_log_collection=storage_config.audit_log_collection,
+            tokens_collection=storage_config.tokens_collection,
         )
         return storage
 

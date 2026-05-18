@@ -18,19 +18,14 @@ Usage:
 """
 
 import functools
-import hashlib
 import logging
-import secrets
-import uuid
-import base64
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable, Optional
 
-import jwt as pyjwt
+import requests as _requests
 from flask import Blueprint, Flask, g, jsonify, request
 
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
-from agentadmit.keys import generate_key_pair, load_private_key, load_public_key
 from agentadmit.storage import create_storage, StorageBackend
 from agentadmit.exceptions import ConfigurationError
 
@@ -80,24 +75,6 @@ class AgentAdmitFlask:
         # Set users collection
         if hasattr(self.storage, 'set_users_collection'):
             self.storage.set_users_collection(users_collection)
-
-        # Auto-generate keys
-        if auto_generate_keys:
-            try:
-                load_private_key(self.config.private_key_path)
-                load_public_key(self.config.public_key_path)
-            except Exception:
-                import os
-                keys_dir = os.path.dirname(self.config.private_key_path) or "keys"
-                generate_key_pair(keys_dir)
-
-        # Build JWKS key
-        try:
-            from agentadmit.routes import _build_jwks_key
-            pub_pem = load_public_key(self.config.public_key_path)
-            self._jwks_key = _build_jwks_key(pub_pem)
-        except Exception:
-            self._jwks_key = None
 
         if app:
             self.init_app(app)
@@ -243,31 +220,6 @@ class AgentAdmitFlask:
         except Exception as exc:
             logger.error("Audit log failed: %s", exc)
 
-    def _create_jwt(self, user_id, scopes, connection_id, role, agent_label, lifetime):
-        """Create a signed RS256 JWT."""
-        private_key = load_private_key(self.config.private_key_path)
-        now = datetime.utcnow()
-        jti = str(uuid.uuid4())
-        payload = {
-            "iss": self.config.api_base_url.rstrip("/"),
-            "sub": user_id,
-            "aud": self.config.audience,
-            "iat": now,
-            "exp": now + timedelta(seconds=lifetime),
-            "jti": jti,
-            "agentadmit": {
-                "version": AGENTADMIT_VERSION,
-                "scopes": scopes,
-                "connection_id": connection_id,
-                "agent_label": agent_label,
-                "role": role,
-            },
-        }
-        token_str = pyjwt.encode(payload, private_key, algorithm=self.config.algorithm)
-        if isinstance(token_str, bytes):
-            token_str = token_str.decode("utf-8")
-        return token_str
-
     def _create_blueprint(self) -> Blueprint:
         """Create the Flask blueprint with all AgentAdmit routes."""
         bp = Blueprint("agentadmit", __name__, url_prefix=self.config.route_prefix)
@@ -281,10 +233,10 @@ class AgentAdmitFlask:
                 "issuer": base,
                 "app_name": aa.config.app_name,
                 "api_base_url": base,
+                "agentadmit_service_url": aa.config.agentadmit_api_url,
                 "token_endpoint": f"{base}{aa.config.route_prefix}/token",
                 "revocation_endpoint": f"{base}{aa.config.route_prefix}/revoke",
                 "scopes_endpoint": f"{base}{aa.config.route_prefix}/scopes",
-                "jwks_uri": f"{base}{aa.config.route_prefix}/.well-known/jwks.json",
                 "scopes_supported": [s.name for s in aa.config.scopes],
                 "roles_supported": list(set(s.role for s in aa.config.scopes)),
                 "duration_options": get_duration_options(),
@@ -294,13 +246,9 @@ class AgentAdmitFlask:
         def scopes_endpoint():
             return jsonify({"scopes": get_scope_metadata(), "roles": list(set(s.role for s in aa.config.scopes))})
 
-        @bp.route("/.well-known/jwks.json", methods=["GET"])
-        def jwks():
-            keys = [aa._jwks_key] if aa._jwks_key else []
-            return jsonify({"keys": keys})
-
         @bp.route("/connections/generate-token", methods=["POST"])
         def generate_token():
+            """Generate a connection token via the AgentAdmit hosted service."""
             if not aa._get_current_user:
                 return jsonify({"error": "not_configured"}), 500
 
@@ -316,36 +264,43 @@ class AgentAdmitFlask:
             if not all_valid:
                 return jsonify({"error": "invalid_scope", "invalid_scopes": invalid}), 400
 
-            exchange_url = f"{aa.config.api_base_url.rstrip('/')}{aa.config.route_prefix}/token"
-            url_part = base64.urlsafe_b64encode(exchange_url.encode()).decode().rstrip("=")
-            secret_part = secrets.token_urlsafe(32)  # 256 bits of cryptographic entropy (industry benchmark)
-            raw_token = f"{aa.config.token_prefix_connection}{url_part}.{secret_part}"
-
-            now = datetime.utcnow()
             user_id = current_user.get(aa.config.user_lookup_field)
             role = aa._determine_role(current_user)
 
-            token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-            aa.storage.store_token({
-                "token_hash": token_hash,
-                "token": raw_token,
-                "user_id": user_id,
-                "scopes": scopes,
-                "role": role,
-                "duration_seconds": duration,
-                "used": False,
-                "created_at": now,
-                "expires_at": now + timedelta(seconds=aa.config.connection_token_ttl),
-            })
+            try:
+                resp = _requests.post(
+                    f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/apps/{aa.config.app_id}/token",
+                    headers={
+                        "Authorization": f"Bearer {aa.config.api_key}",
+                        "Content-Type": "application/json",
+                        "X-App-Id": aa.config.app_id,
+                    },
+                    json={
+                        "user_id": str(user_id),
+                        "scopes": scopes,
+                        "duration_hours": max(1, duration // 3600),
+                        "label": data.get("label"),
+                        "user_role": role,
+                    },
+                    timeout=10,
+                )
+            except _requests.exceptions.RequestException as exc:
+                return jsonify({"error": "service_unavailable", "error_description": str(exc)}), 502
 
+            if resp.status_code not in (200, 201):
+                logger.error("Hosted token generation failed: %s %s", resp.status_code, resp.text[:500])
+                return jsonify({"error": "token_generation_failed", "error_description": "Authorization service could not generate token"}), 502
+
+            token_data = resp.json()
             return jsonify({
-                "connection_token": raw_token,
-                "expires_in": aa.config.connection_token_ttl,
+                "connection_token": token_data.get("token") or token_data.get("connection_token"),
+                "expires_in": duration,
                 "scopes": scopes,
             })
 
         @bp.route("/token", methods=["POST"])
         def token_exchange():
+            """Exchange a connection token for an access token via the AgentAdmit hosted service."""
             data = request.get_json()
             grant_type = data.get("grant_type")
             connection_token = data.get("connection_token")
@@ -355,56 +310,35 @@ class AgentAdmitFlask:
             if not connection_token:
                 return jsonify({"error": "invalid_request", "error_description": "connection_token required"}), 400
 
-            token_hash = hashlib.sha256(connection_token.encode()).hexdigest()
-            now = datetime.utcnow()
-            token_doc = aa.storage.get_token(token_hash)
+            try:
+                resp = _requests.post(
+                    f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/exchange",
+                    headers={
+                        "Authorization": f"Bearer {aa.config.api_key}",
+                        "Content-Type": "application/json",
+                        "X-App-Id": aa.config.app_id,
+                    },
+                    json={
+                        "token": connection_token,
+                        "agent_label": data.get("agent_label"),
+                        "agent_id": data.get("agent_id"),
+                        "agent_metadata": data.get("agent_metadata"),
+                    },
+                    timeout=10,
+                )
+            except _requests.exceptions.RequestException as exc:
+                return jsonify({"error": "service_unavailable", "error_description": str(exc)}), 502
 
-            if not token_doc or token_doc.get("used") or token_doc.get("expires_at", now) <= now:
-                return jsonify({"error": "invalid_token", "error_description": "Token expired, used, or not found"}), 400
+            if resp.status_code != 200:
+                try:
+                    return jsonify(resp.json()), resp.status_code if resp.status_code < 500 else 502
+                except Exception:
+                    return jsonify({"error": "exchange_failed"}), 502
 
-            aa.storage.mark_token_used(token_hash)
-
-            connection_id = f"conn_{secrets.token_urlsafe(16)}"
-            agent_label = data.get("agent_label", "Unknown Agent")
-            token_duration = token_doc.get("duration_seconds", 2592000)
-
-            aa.storage.store_connection({
-                "connection_id": connection_id,
-                "user_id": token_doc["user_id"],
-                "scopes": token_doc["scopes"],
-                "role": token_doc.get("role", "user"),
-                "agent_id": data.get("agent_id"),
-                "agent_label": agent_label,
-                "agent_metadata": data.get("agent_metadata"),
-                "duration_seconds": token_duration,
-                "expires_at": now + timedelta(seconds=token_duration),
-                "status": "active",
-                "created_at": now,
-                "last_used": None,
-                "revoked_at": None,
-            })
-
-            raw_jwt = aa._create_jwt(
-                user_id=token_doc["user_id"],
-                scopes=token_doc["scopes"],
-                connection_id=connection_id,
-                role=token_doc.get("role", "user"),
-                agent_label=agent_label,
-                lifetime=token_duration,
-            )
-            access_token = f"{aa.config.token_prefix_access}{raw_jwt}"
-
-            return jsonify({
-                "access_token": access_token,
-                "token_type": "bearer",
-                "expires_in": token_duration,
-                "scopes": token_doc["scopes"],
-                "role": token_doc.get("role", "user"),
-                "connection_id": connection_id,
-                "app_name": aa.config.app_name,
-                "api_base_url": aa.config.api_base_url,
-                "endpoints": aa._get_endpoints_for_scopes(token_doc["scopes"]),
-            })
+            exchange_data = resp.json()
+            if aa._get_endpoints_for_scopes and exchange_data.get("scopes"):
+                exchange_data["endpoints"] = aa._get_endpoints_for_scopes(exchange_data["scopes"])
+            return jsonify(exchange_data)
 
         @bp.route("/connections", methods=["GET"])
         def list_connections():
@@ -428,6 +362,20 @@ class AgentAdmitFlask:
             conn = aa.storage.get_connection(connection_id)
             if not conn or conn.get("user_id") != user_id:
                 return jsonify({"error": "not_found"}), 404
+            # Call hosted service to revoke
+            try:
+                _requests.post(
+                    f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/revoke",
+                    headers={
+                        "Authorization": f"Bearer {aa.config.api_key}",
+                        "Content-Type": "application/json",
+                        "X-App-Id": aa.config.app_id,
+                    },
+                    json={"connection_id": connection_id, "reason": "user_requested"},
+                    timeout=10,
+                )
+            except Exception as exc:
+                logger.warning("Hosted revoke failed for %s: %s (revoking locally anyway)", connection_id, exc)
             aa.storage.revoke_connection(connection_id)
             return jsonify({"revoked": True, "connection_id": connection_id})
 

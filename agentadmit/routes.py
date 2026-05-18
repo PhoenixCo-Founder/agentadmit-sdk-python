@@ -3,21 +3,18 @@ agentadmit.routes
 -----------------
 Auto-generated FastAPI router with all AgentAdmit endpoints.
 
-Call create_agentadmit_router() and include the returned routers in your FastAPI app.
-The SDK handles discovery, JWKS, token exchange, revocation, connections, and scopes.
+ALL token operations go through the AgentAdmit hosted service. The SDK does NOT
+sign JWTs, generate RSA keys, or serve JWKS endpoints. The hosted service owns
+all cryptographic operations — this is how we meter usage, seed the marketplace,
+and enforce billing.
 
-Generalized from TrainerTracer's agentadmit_routes.py — all app-specific references removed.
+Call create_agentadmit_router() and include the returned routers in your FastAPI app.
 """
 
-import base64
 import logging
-import secrets
-import uuid
-from datetime import datetime, timedelta
 from typing import Callable, Optional
 
-import jwt as pyjwt
-from cryptography.hazmat.primitives.serialization import load_pem_public_key
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
@@ -29,7 +26,6 @@ from agentadmit.auth import (
     security,
 )
 from agentadmit.config import get_config, get_scope_metadata, get_duration_options, get_tier_limits
-from agentadmit.keys import load_private_key, load_public_key
 from agentadmit.models import (
     GenerateTokenRequest,
     GenerateTokenResponse,
@@ -43,92 +39,37 @@ logger = logging.getLogger(__name__)
 AGENTADMIT_VERSION = "0.1"
 
 
-def _build_jwks_key(public_key_pem: str) -> Optional[dict]:
-    """Build a JWKS key entry from the public PEM key."""
-    try:
-        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicNumbers
-        pub = load_pem_public_key(public_key_pem.encode())
-        numbers = pub.public_numbers()
-
-        def _b64url(n: int, length: int = None) -> str:
-            if length is None:
-                length = (n.bit_length() + 7) // 8
-            return base64.urlsafe_b64encode(n.to_bytes(length, "big")).decode().rstrip("=")
-
-        return {
-            "kty": "RSA",
-            "use": "sig",
-            "alg": "RS256",
-            "kid": "agentadmit-1",
-            "n": _b64url(numbers.n),
-            "e": _b64url(numbers.e),
-        }
-    except Exception as exc:
-        logger.warning("Failed to build JWKS key: %s", exc)
-        return None
-
-
-def _create_jwt(
-    user_id: str,
-    scopes: list,
-    connection_id: str,
-    role: str,
-    agent_label: str = "Unknown Agent",
-    lifetime_seconds: int = 2592000,
-) -> str:
+def _call_hosted_service(method: str, path: str, json: dict = None, timeout: float = 10.0) -> httpx.Response:
     """
-    Create a signed RS256 JWT for AgentAdmit access.
-
-    Returns the raw JWT string (no ag_at_ prefix — caller adds it).
+    Make an authenticated request to the AgentAdmit hosted service.
+    Uses the app's API key for server-to-server auth.
     """
     config = get_config()
-    private_key = load_private_key(config.private_key_path)
-
-    now = datetime.utcnow()
-    jti = str(uuid.uuid4())
-
-    payload = {
-        "iss": config.api_base_url.rstrip("/"),
-        "sub": user_id,
-        "aud": config.audience,
-        "iat": now,
-        "exp": now + timedelta(seconds=lifetime_seconds),
-        "jti": jti,
-        "agentadmit": {
-            "version": AGENTADMIT_VERSION,
-            "scopes": scopes,
-            "connection_id": connection_id,
-            "agent_label": agent_label,
-            "role": role,
-        },
+    url = f"{config.agentadmit_api_url.rstrip('/')}{path}"
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+        "X-App-Id": config.app_id,
     }
-
-    token_str = pyjwt.encode(
-        payload,
-        private_key,
-        algorithm=config.algorithm,
-        headers={"kid": "agentadmit-1"},
-    )
-
-    if isinstance(token_str, bytes):
-        token_str = token_str.decode("utf-8")
-
-    # Store jti for revocation tracking (best-effort)
     try:
-        storage = _get_storage()
-        storage.store_token({
-            "jti": jti,
-            "token_hash": jti,  # using jti as hash for access tokens
-            "connection_id": connection_id,
-            "user_id": user_id,
-            "issued_at": now,
-            "expires_at": now + timedelta(seconds=lifetime_seconds),
-            "used": True,  # access tokens are "used" immediately
-        })
-    except Exception as exc:
-        logger.warning("Failed to record access token jti: %s", exc)
-
-    return token_str
+        with httpx.Client(timeout=timeout) as client:
+            if method.upper() == "GET":
+                return client.get(url, headers=headers)
+            elif method.upper() == "POST":
+                return client.post(url, headers=headers, json=json or {})
+            elif method.upper() == "DELETE":
+                return client.delete(url, headers=headers)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+    except httpx.RequestError as exc:
+        logger.error("Failed to reach AgentAdmit hosted service at %s: %s", url, exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "service_unavailable",
+                "error_description": "Could not reach AgentAdmit authorization service",
+            },
+        )
 
 
 def create_agentadmit_router(
@@ -143,21 +84,13 @@ def create_agentadmit_router(
 
     Args:
         get_current_user: FastAPI dependency that returns the authenticated user dict.
-            Must return a dict with at least the user ID field (configurable via user_lookup_field).
-        determine_role: Function(user_dict) -> str. Returns the user's role (e.g., "user", "admin").
-            Default: returns "user" for everyone.
-        get_user_tier: Function(user_dict) -> str. Returns the user's AgentAdmit tier.
-            Default: returns the default tier from config.
+        determine_role: Function(user_dict) -> str. Returns the user's role.
+        get_user_tier: Function(user_dict) -> str. Returns the user's subscription tier.
         validate_scopes: Function(scopes: list, user_dict) -> tuple[bool, list].
-            Returns (all_valid, invalid_scopes). Default: all scopes are valid.
         get_endpoints_for_scopes: Function(scopes: list) -> list[dict].
-            Returns endpoint definitions for the granted scopes. Default: empty list.
 
     Returns:
         Tuple of (wellknown_router, agentadmit_router).
-        Include both in your FastAPI app:
-            app.include_router(wellknown_router)
-            app.include_router(agentadmit_router, prefix="/agentadmit")
     """
     config = get_config()
     storage = _get_storage()
@@ -178,13 +111,6 @@ def create_agentadmit_router(
     if get_endpoints_for_scopes is None:
         get_endpoints_for_scopes = lambda scopes: []
 
-    # Build JWKS key once
-    try:
-        public_key_pem = load_public_key(config.public_key_path)
-        jwks_key = _build_jwks_key(public_key_pem)
-    except Exception:
-        jwks_key = None
-
     # ── Routers ──────────────────────────────────────────────────────────────
     wellknown_router = APIRouter(tags=["AgentAdmit Discovery"])
     agentadmit_router = APIRouter(tags=["AgentAdmit"])
@@ -201,15 +127,16 @@ def create_agentadmit_router(
             "agentadmit_version": AGENTADMIT_VERSION,
             "issuer": base,
             "app_name": config.app_name,
+            "app_id": config.app_id,
             "api_base_url": base,
-            "token_endpoint": f"{base}{config.route_prefix}/token",
-            "revocation_endpoint": f"{base}{config.route_prefix}/revoke",
+            # Token operations go through the HOSTED service:
+            "agentadmit_service_url": config.agentadmit_api_url,
             "scopes_endpoint": f"{base}{config.route_prefix}/scopes",
-            "jwks_uri": f"{base}{config.route_prefix}/.well-known/jwks.json",
+            "discovery_endpoint": f"{base}{config.route_prefix}/discovery",
+            "connections_endpoint": f"{base}{config.route_prefix}/connections",
             "scopes_supported": scope_names,
             "roles_supported": roles,
             "duration_options": get_duration_options(),
-            "documentation_url": f"{base}/docs/agentadmit",
         }
 
     # ── Scopes ───────────────────────────────────────────────────────────────
@@ -221,17 +148,8 @@ def create_agentadmit_router(
             "roles": list(set(s.role for s in config.scopes)),
         }
 
-    # ── JWKS ─────────────────────────────────────────────────────────────────
-
-    @agentadmit_router.get("/.well-known/jwks.json", summary="JWKS public key")
-    async def jwks_endpoint():
-        keys = [jwks_key] if jwks_key else []
-        return JSONResponse(
-            content={"keys": keys},
-            headers={"Cache-Control": "public, max-age=3600"},
-        )
-
     # ── Generate Connection Token (user-authenticated) ───────────────────────
+    # Calls the AgentAdmit hosted service to create the token.
 
     @agentadmit_router.post(
         "/connections/generate-token",
@@ -242,7 +160,7 @@ def create_agentadmit_router(
         body: GenerateTokenRequest,
         current_user: dict = Depends(get_current_user),
     ):
-        # Validate scopes
+        # Validate scopes locally first (fast check before hitting hosted service)
         all_valid, invalid = validate_scopes(body.scopes, current_user)
         if not all_valid:
             raise HTTPException(
@@ -254,48 +172,61 @@ def create_agentadmit_router(
                 },
             )
 
-        # Duration validation
         duration = body.duration_seconds or config.connection_token_ttl
         if duration < 300:
             raise HTTPException(status_code=400, detail={"error": "invalid_request", "error_description": "duration_seconds must be at least 300 (5 minutes)"})
-        if duration > 315360000:
-            raise HTTPException(status_code=400, detail={"error": "invalid_request", "error_description": "duration_seconds must not exceed 315360000 (~10 years)"})
 
-        # Generate self-describing token
-        exchange_url = f"{config.api_base_url.rstrip('/')}{config.route_prefix}/token"
-        url_part = base64.urlsafe_b64encode(exchange_url.encode()).decode().rstrip("=")
-        secret_part = secrets.token_urlsafe(32)  # 256 bits of cryptographic entropy (industry benchmark)
-        raw_token = f"{config.token_prefix_connection}{url_part}.{secret_part}"
-
-        now = datetime.utcnow()
-        expires_at = now + timedelta(seconds=config.connection_token_ttl)
         user_id = current_user.get(config.user_lookup_field)
         role = determine_role(current_user)
+        user_tier = get_user_tier(current_user)
 
-        # Store token
-        import hashlib
-        token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
-        storage.store_token({
-            "token_hash": token_hash,
-            "token": raw_token,
-            "user_id": user_id,
+        # Check connection cap locally (fast fail)
+        check_connection_cap(user_id, user_tier)
+
+        # Call AgentAdmit hosted service to generate the connection token
+        resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json={
+            "user_id": str(user_id),
             "scopes": body.scopes,
-            "role": role,
-            "duration_seconds": duration,
-            "used": False,
-            "created_at": now,
-            "expires_at": expires_at,
+            "duration_hours": max(1, duration // 3600),
+            "label": body.label,
+            "user_role": role,
+            "metadata": {
+                "subscription_tier": user_tier,
+                "app_name": config.app_name,
+            },
         })
 
-        logger.info("Connection token generated for user %s with %d scopes", user_id, len(body.scopes))
+        if resp.status_code not in (200, 201):
+            logger.error("Hosted token generation failed: %s %s", resp.status_code, resp.text[:500])
+            raise HTTPException(
+                status_code=502,
+                detail={"error": "token_generation_failed", "error_description": "Authorization service could not generate token"},
+            )
+
+        token_data = resp.json()
+
+        # Store local record for the connections list
+        storage.store_connection({
+            "connection_id": token_data.get("connection_id", "unknown"),
+            "user_id": str(user_id),
+            "scopes": body.scopes,
+            "role": role,
+            "agent_label": body.label,
+            "duration_seconds": duration,
+            "status": "active",
+        })
+
+        logger.info("Connection token generated via hosted service for user %s with %d scopes", user_id, len(body.scopes))
 
         return GenerateTokenResponse(
-            connection_token=raw_token,
-            expires_in=config.connection_token_ttl,
+            connection_token=token_data.get("token") or token_data.get("connection_token"),
+            expires_in=duration,
             scopes=body.scopes,
         )
 
     # ── Token Exchange (agent-facing, no auth) ───────────────────────────────
+    # The agent sends the connection token here. We forward it to the hosted
+    # service which handles all cryptographic operations (signing, etc.).
 
     @agentadmit_router.post("/token", summary="Token exchange: connection_token → access_token")
     def token_exchange(body: TokenExchangeRequest):
@@ -311,81 +242,35 @@ def create_agentadmit_router(
                 detail={"error": "invalid_request", "error_description": "connection_token is required"},
             )
 
-        # Look up token
-        import hashlib
-        token_hash = hashlib.sha256(body.connection_token.encode()).hexdigest()
-        now = datetime.utcnow()
-        token_doc = storage.get_token(token_hash)
-
-        if not token_doc:
-            # Try direct token match (backward compat)
-            # Some storage backends may store the raw token
-            token_doc = storage.get_token(body.connection_token)
-
-        if not token_doc or token_doc.get("used") or token_doc.get("expires_at", now) <= now:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": "invalid_token", "error_description": "Connection token has expired, already been used, or does not exist"},
-            )
-
-        # Tier enforcement
-        user_tier = config.default_tier
-        user = storage.get_user(token_doc["user_id"], config.user_lookup_field)
-        if user and get_user_tier:
-            user_tier = get_user_tier(user)
-        check_connection_cap(token_doc["user_id"], user_tier)
-
-        # Mark used
-        storage.mark_token_used(token_hash)
-
-        # Create connection
-        connection_id = f"conn_{secrets.token_urlsafe(16)}"
-        agent_label = body.agent_label or "Unknown Agent"
-        token_duration = token_doc.get("duration_seconds", 2592000)
-
-        storage.store_connection({
-            "connection_id": connection_id,
-            "user_id": token_doc["user_id"],
-            "scopes": token_doc["scopes"],
-            "role": token_doc.get("role", "user"),
+        # Forward the exchange to the AgentAdmit hosted service
+        resp = _call_hosted_service("POST", "/api/v1/exchange", json={
+            "token": body.connection_token,
+            "agent_label": body.agent_label,
             "agent_id": body.agent_id,
-            "agent_label": agent_label,
             "agent_metadata": body.agent_metadata,
-            "duration_seconds": token_duration,
-            "expires_at": now + timedelta(seconds=token_duration),
-            "status": "active",
-            "created_at": now,
-            "last_used": None,
-            "revoked_at": None,
         })
 
-        # Issue JWT
-        raw_jwt = _create_jwt(
-            user_id=token_doc["user_id"],
-            scopes=token_doc["scopes"],
-            connection_id=connection_id,
-            role=token_doc.get("role", "user"),
-            agent_label=agent_label,
-            lifetime_seconds=token_duration,
-        )
-        access_token = f"{config.token_prefix_access}{raw_jwt}"
+        if resp.status_code != 200:
+            detail = {"error": "exchange_failed", "error_description": "Token exchange failed"}
+            try:
+                detail = resp.json()
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code if resp.status_code < 500 else 502, detail=detail)
+
+        exchange_data = resp.json()
+
+        # Add the endpoint map if we have one locally
+        if get_endpoints_for_scopes and exchange_data.get("scopes"):
+            exchange_data["endpoints"] = get_endpoints_for_scopes(exchange_data["scopes"])
 
         logger.info(
-            "Token exchanged: connection=%s user=%s scopes=%s duration=%ds",
-            connection_id, token_doc["user_id"], token_doc["scopes"], token_duration,
+            "Token exchanged via hosted service: connection=%s scopes=%s",
+            exchange_data.get("connection_id"),
+            exchange_data.get("scopes"),
         )
 
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "expires_in": token_duration,
-            "scopes": token_doc["scopes"],
-            "role": token_doc.get("role", "user"),
-            "connection_id": connection_id,
-            "app_name": config.app_name,
-            "api_base_url": config.api_base_url,
-            "endpoints": get_endpoints_for_scopes(token_doc["scopes"]),
-        }
+        return exchange_data
 
     # ── Revoke (agent or user) ───────────────────────────────────────────────
 
@@ -398,15 +283,26 @@ def create_agentadmit_router(
             raise HTTPException(status_code=401, detail="Not authenticated")
 
         token = credentials.credentials
-        now = datetime.utcnow()
         reason = body.reason or "user_requested"
 
         if token.startswith(config.token_prefix_access):
-            # Agent-initiated
+            # Agent-initiated revocation
             agent_ctx = get_agentadmit_user(credentials)
             conn_id = agent_ctx["connection"]["connection_id"]
-            storage.revoke_connection(conn_id)
-            logger.info("Connection revoked by agent: %s reason=%s", conn_id, reason)
+
+            # Call hosted service to revoke
+            resp = _call_hosted_service("POST", "/api/v1/revoke", json={
+                "connection_id": conn_id,
+                "reason": reason,
+            })
+
+            # Also revoke locally
+            try:
+                storage.revoke_connection(conn_id)
+            except Exception:
+                pass
+
+            logger.info("Connection revoked by agent via hosted service: %s reason=%s", conn_id, reason)
             return RevokeResponse(revoked=True, connection_id=conn_id)
         else:
             raise HTTPException(
@@ -425,14 +321,24 @@ def create_agentadmit_router(
         user_id = current_user.get(config.user_lookup_field)
         conn = storage.get_connection(connection_id)
 
-        if not conn or conn.get("user_id") != user_id:
+        if not conn or conn.get("user_id") != str(user_id):
             raise HTTPException(status_code=404, detail={"error": "not_found", "error_description": "Connection not found"})
 
         if conn.get("status") != "active":
             raise HTTPException(status_code=400, detail={"error": "already_revoked", "error_description": "Connection is already revoked or expired"})
 
+        # Call hosted service to revoke
+        try:
+            _call_hosted_service("POST", "/api/v1/revoke", json={
+                "connection_id": connection_id,
+                "reason": reason,
+            })
+        except Exception as exc:
+            logger.warning("Hosted revoke failed for %s: %s (revoking locally anyway)", connection_id, exc)
+
+        # Always revoke locally
         storage.revoke_connection(connection_id)
-        logger.info("Connection revoked by user: %s reason=%s", connection_id, reason)
+        logger.info("Connection revoked by user via hosted service: %s reason=%s", connection_id, reason)
         return RevokeResponse(revoked=True, connection_id=connection_id)
 
     # ── List connections (user-authenticated) ────────────────────────────────
@@ -440,7 +346,7 @@ def create_agentadmit_router(
     @agentadmit_router.get("/connections", summary="List your agent connections")
     def list_connections(current_user: dict = Depends(get_current_user)):
         user_id = current_user.get(config.user_lookup_field)
-        connections = storage.list_connections(user_id)
+        connections = storage.list_connections(str(user_id))
 
         result = []
         for c in connections:
@@ -458,6 +364,33 @@ def create_agentadmit_router(
             })
 
         return {"connections": result, "total": len(result)}
+
+    # ── Agent Discovery (authenticated with ag_at_ token) ────────────────────
+
+    @agentadmit_router.get("/discovery", summary="API discovery for AI agents")
+    def agent_discovery(agent_ctx: dict = Depends(get_agentadmit_user)):
+        """Returns the endpoint map filtered by the agent's granted scopes."""
+        granted_scopes = agent_ctx.get("scopes", [])
+        endpoints = get_endpoints_for_scopes(granted_scopes)
+
+        return {
+            "app_name": config.app_name,
+            "api_base_url": config.api_base_url,
+            "granted_scopes": granted_scopes,
+            "endpoints": endpoints,
+            "auth_instructions": "Include the access token in the Authorization header: Authorization: Bearer ag_at_<your_token>",
+        }
+
+    # ── Agent Status (authenticated with ag_at_ token) ───────────────────────
+
+    @agentadmit_router.get("/agent/status", summary="Agent connection health check")
+    def agent_status(agent_ctx: dict = Depends(get_agentadmit_user)):
+        return {
+            "status": "active",
+            "connection_id": agent_ctx.get("connection", {}).get("connection_id"),
+            "scopes": agent_ctx.get("scopes", []),
+            "app_name": config.app_name,
+        }
 
     # ── Duration options (for frontend) ──────────────────────────────────────
 
