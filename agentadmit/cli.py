@@ -104,12 +104,11 @@ def cmd_init(args):
 
 
 def cmd_keys(args):
-    """Generate or regenerate RS256 key pair."""
-    from agentadmit.keys import generate_key_pair
-    output = args.output or "keys"
-    priv, pub = generate_key_pair(output)
-    print(f"Generated: {priv}")
-    print(f"Generated: {pub}")
+    """DEPRECATED — AgentAdmit is a hosted service. Local keys are not needed."""
+    print("AgentAdmit is a hosted service. All token signing is handled by api.agentadmit.com.")
+    print("Local RSA keys are not needed. Remove private_key_path and public_key_path from agentadmit.yaml.")
+    print()
+    print("If you previously generated keys, they can be safely deleted.")
 
 
 def cmd_check(args):
@@ -125,14 +124,15 @@ def cmd_check(args):
         print(f"Durations: {len(config.durations)}")
         print(f"Storage: {config.storage.backend}")
 
-        # Check keys
-        from agentadmit.keys import load_private_key, load_public_key
-        try:
-            load_private_key(config.private_key_path)
-            load_public_key(config.public_key_path)
-            print("Keys: OK")
-        except Exception as e:
-            print(f"Keys: MISSING ({e})")
+        # Hosted service check
+        if config.api_key:
+            print(f"API Key: configured ({config.api_key[:12]}...)")
+        else:
+            print("API Key: NOT SET — get one from your AgentAdmit dashboard")
+        if config.agentadmit_verify_url:
+            print(f"Verify URL: {config.agentadmit_verify_url}")
+        else:
+            print("Verify URL: NOT SET — defaults to https://api.agentadmit.com/v1/verify")
 
         if len(config.scopes) == 0:
             print()
@@ -148,6 +148,46 @@ def cmd_check(args):
 
     except Exception as e:
         print(f"Configuration error: {e}")
+        sys.exit(1)
+
+
+def cmd_sync(args):
+    """Sync scopes from agentadmit.yaml to the AgentAdmit hosted service."""
+    config_path = args.config or "agentadmit.yaml"
+    try:
+        from agentadmit.config import load_config
+        config = load_config(config_path)
+        print(f"Config: {config_path}")
+        print(f"App: {config.app_name} ({config.app_id})")
+        print(f"Scopes: {len(config.scopes)}")
+        print(f"Service: {config.agentadmit_api_url}")
+        print()
+
+        if not config.app_id or not config.api_key:
+            print("ERROR: app_id and api_key must be set in agentadmit.yaml.")
+            print("Get these from your AgentAdmit dashboard at agentadmit.com.")
+            sys.exit(1)
+
+        if not config.scopes:
+            print("WARNING: No scopes defined. Add scopes to agentadmit.yaml first.")
+            sys.exit(1)
+
+        from agentadmit.middleware import _sync_scopes_to_hosted_service
+        print(f"Syncing {len(config.scopes)} scopes to {config.agentadmit_api_url}...")
+        success = _sync_scopes_to_hosted_service(config)
+
+        if success:
+            print()
+            print(f"✅ {len(config.scopes)} scopes synced successfully.")
+            print("View them in your AgentAdmit dashboard under Apps → Scopes.")
+        else:
+            print()
+            print("❌ Sync failed. Check the error messages above.")
+            print("Make sure the AgentAdmit hosted service is reachable and your API key is valid.")
+            sys.exit(1)
+
+    except Exception as e:
+        print(f"Error: {e}")
         sys.exit(1)
 
 
@@ -170,6 +210,10 @@ def main():
     check_parser = subparsers.add_parser("check", help="Validate configuration")
     check_parser.add_argument("--config", "-c", help="Config file path (default: agentadmit.yaml)")
 
+    # sync
+    sync_parser = subparsers.add_parser("sync", help="Sync scopes from agentadmit.yaml to the hosted service")
+    sync_parser.add_argument("--config", "-c", help="Config file path (default: agentadmit.yaml)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -178,6 +222,8 @@ def main():
         cmd_keys(args)
     elif args.command == "check":
         cmd_check(args)
+    elif args.command == "sync":
+        cmd_sync(args)
     else:
         parser.print_help()
 

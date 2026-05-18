@@ -9,45 +9,122 @@ One line to add to your app:
 This middleware:
 1. Loads configuration from YAML
 2. Initializes storage backend
-3. Generates keys if they don't exist
-4. Registers AgentAdmit routes (discovery, token exchange, etc.)
+3. Syncs scopes to the AgentAdmit hosted service (auto-sync on startup)
+4. Provides create_agentadmit_router() for manual route registration
+
+NOTE: Due to Starlette's middleware wrapping, routes cannot be auto-registered
+from within __init__. Use the manual pattern shown in the docstring below.
 """
 
 import logging
 from typing import Callable, Optional
 
+import httpx
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
-from agentadmit.config import load_config
+from agentadmit.config import load_config, get_config
 from agentadmit.storage import create_storage
 from agentadmit.auth import _set_storage, _set_user_verifier
 from agentadmit.routes import create_agentadmit_router
-from agentadmit.keys import generate_key_pair, load_private_key, load_public_key
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_scopes_to_hosted_service(config) -> bool:
+    """
+    Push scopes from agentadmit.yaml to the AgentAdmit hosted service.
+    Called automatically on startup. Idempotent (upsert by app_id + scope name).
+
+    Returns True if sync succeeded, False otherwise.
+    """
+    if not config.app_id or not config.api_key:
+        logger.warning(
+            "Cannot sync scopes — app_id or api_key not set. "
+            "Get these from your AgentAdmit dashboard."
+        )
+        return False
+
+    if not config.scopes:
+        logger.info("No scopes defined in agentadmit.yaml — nothing to sync.")
+        return True
+
+    url = f"{config.agentadmit_api_url.rstrip('/')}/api/v1/apps/{config.app_id}/scopes"
+    headers = {
+        "Authorization": f"Bearer {config.api_key}",
+        "Content-Type": "application/json",
+        "X-App-Id": config.app_id,
+    }
+    payload = {
+        "scopes": [
+            {
+                "name": s.name,
+                "description": s.description,
+                "category": s.category,
+                "role": s.role,
+            }
+            for s in config.scopes
+        ]
+    }
+
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(url, headers=headers, json=payload)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            count = data.get("count", len(config.scopes))
+            logger.info("Scopes synced to hosted service: %d scopes registered", count)
+            return True
+        else:
+            logger.warning(
+                "Scope sync failed (HTTP %d): %s",
+                resp.status_code,
+                resp.text[:300],
+            )
+            return False
+    except httpx.RequestError as exc:
+        logger.warning(
+            "Could not reach AgentAdmit hosted service for scope sync: %s. "
+            "Scopes will need to be registered manually via the dashboard or API.",
+            exc,
+        )
+        return False
 
 
 class AgentAdmitMiddleware(BaseHTTPMiddleware):
     """
     FastAPI middleware that initializes and configures AgentAdmit.
 
-    Usage:
-        from agentadmit import AgentAdmitMiddleware
+    IMPORTANT: Due to Starlette's middleware wrapping, this middleware CANNOT
+    auto-register routes from within __init__. After adding the middleware,
+    register routes manually:
 
-        app = FastAPI()
-        app.add_middleware(
-            AgentAdmitMiddleware,
-            config_path="agentadmit.yaml",
-            get_current_user=your_auth_dependency,      # required
-            verify_user_token=your_token_verifier,      # required for dual-token
-            determine_role=your_role_function,           # optional
-            get_user_tier=your_tier_function,            # optional
-            validate_scopes=your_scope_validator,        # optional
-            get_endpoints_for_scopes=your_endpoints_fn,  # optional
-            users_collection="users",                    # MongoDB collection name
-        )
+        from agentadmit import AgentAdmitMiddleware
+        from agentadmit.config import load_config, get_config
+        from agentadmit.routes import create_agentadmit_router
+        from agentadmit.storage import create_storage
+        from agentadmit.auth import _set_storage, _set_user_verifier
+
+        # Option 1: Let middleware handle init, register routes manually
+        app.add_middleware(AgentAdmitMiddleware, config_path="agentadmit.yaml", ...)
+
+        config = get_config()  # Available after middleware init
+        wellknown, router = create_agentadmit_router(get_current_user=your_auth)
+        app.include_router(wellknown)
+        app.include_router(router, prefix=config.route_prefix)
+
+        # Option 2: Do everything manually (recommended)
+        load_config("agentadmit.yaml")
+        config = get_config()
+        storage = create_storage(config)
+        _set_storage(storage)
+        _set_user_verifier(your_token_verifier)
+
+        wellknown, router = create_agentadmit_router(get_current_user=your_auth)
+        app.include_router(wellknown)
+        app.include_router(router, prefix=config.route_prefix)
     """
 
     def __init__(
@@ -61,7 +138,7 @@ class AgentAdmitMiddleware(BaseHTTPMiddleware):
         validate_scopes: Callable = None,
         get_endpoints_for_scopes: Callable = None,
         users_collection: str = "users",
-        auto_generate_keys: bool = True,
+        sync_scopes: bool = True,
     ):
         super().__init__(app)
 
@@ -87,39 +164,20 @@ class AgentAdmitMiddleware(BaseHTTPMiddleware):
         if verify_user_token:
             _set_user_verifier(verify_user_token)
 
-        # Create and register routes
+        # Auto-sync scopes to hosted service on startup
+        if sync_scopes and config.app_id and config.api_key:
+            _sync_scopes_to_hosted_service(config)
+
+        # NOTE: Route registration cannot happen here due to Starlette's
+        # middleware wrapping. The app instance passed to __init__ is already
+        # wrapped by other middleware, so app.include_router() won't reach
+        # the actual FastAPI instance. See class docstring for manual pattern.
         if get_current_user is not None:
-            wellknown_router, agentadmit_router = create_agentadmit_router(
-                get_current_user=get_current_user,
-                determine_role=determine_role,
-                get_user_tier=get_user_tier,
-                validate_scopes=validate_scopes,
-                get_endpoints_for_scopes=get_endpoints_for_scopes,
-            )
-
-            # Register routers with the FastAPI app
-            # We need to access the underlying FastAPI app from Starlette
-            from fastapi import FastAPI
-            fastapi_app = app
-            while hasattr(fastapi_app, 'app'):
-                fastapi_app = fastapi_app.app
-                if isinstance(fastapi_app, FastAPI):
-                    break
-
-            if isinstance(fastapi_app, FastAPI):
-                fastapi_app.include_router(wellknown_router)
-                fastapi_app.include_router(agentadmit_router, prefix=config.route_prefix)
-                logger.info(
-                    "AgentAdmit routes registered: %s (discovery) + %s/* (API)",
-                    config.discovery_path,
-                    config.route_prefix,
-                )
-            else:
-                logger.warning("Could not auto-register routes — include them manually")
-        else:
-            logger.warning(
-                "No get_current_user provided — AgentAdmit routes not registered. "
-                "Pass get_current_user to enable token generation and management endpoints."
+            logger.info(
+                "AgentAdmit routes available via create_agentadmit_router(). "
+                "Register them manually: app.include_router(wellknown); "
+                "app.include_router(router, prefix='%s')",
+                config.route_prefix,
             )
 
     async def dispatch(self, request: Request, call_next) -> Response:

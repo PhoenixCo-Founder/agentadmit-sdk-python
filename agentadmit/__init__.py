@@ -30,7 +30,7 @@ from agentadmit.auth import (
     check_connection_cap,
 )
 from agentadmit.routes import create_agentadmit_router
-from agentadmit.keys import generate_key_pair
+# keys.py is deprecated — AgentAdmit is a hosted service, no local keys needed
 from agentadmit.exceptions import (
     AgentAdmitError,
     InvalidTokenError,
@@ -51,7 +51,7 @@ __all__ = [
     "log_agent_access",
     "check_connection_cap",
     "create_agentadmit_router",
-    "generate_key_pair",
+
     "AgentAdmitError",
     "InvalidTokenError",
     "InsufficientScopeError",
