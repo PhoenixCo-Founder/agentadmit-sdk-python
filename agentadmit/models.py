@@ -21,6 +21,7 @@ class GenerateTokenRequest(BaseModel):
         ge=300,          # min 5 minutes
         le=315360000,    # max ~10 years
     )
+    label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'Phoenix — Workout Tracker')")
 
 
 class GenerateTokenResponse(BaseModel):
@@ -88,6 +89,7 @@ class ConnectionInfo(BaseModel):
     scopes: list[str]
     role: str
     agent_label: Optional[str] = None
+    label: Optional[str] = None  # Alias for agent_label — both are returned for frontend compatibility
     agent_id: Optional[str] = None
     status: str
     created_at: Optional[str] = None
