@@ -200,6 +200,37 @@ except RateLimitError as e:
 - `remaining` — `X-RateLimit-Remaining` header value (or `None`)
 - `reset` — `X-RateLimit-Reset` Unix timestamp (or `None`)
 
+## Route Registration Order (FastAPI)
+
+When using `create_agentadmit_router()`, the SDK registers default endpoints for
+`/agentadmit/scopes`, `/agentadmit/connections/generate-token`, etc.
+
+If you need to **override** any SDK endpoint with your own (e.g., a user-aware
+`/scopes` endpoint), register your route **before** calling `app.include_router()`.
+FastAPI resolves routes in registration order — the first matching route wins.
+
+```python
+# ✅ CORRECT — custom /scopes registered before SDK router
+@app.get("/agentadmit/scopes")
+async def my_scopes(current_user: dict = Depends(get_current_user)):
+    # your user-aware logic
+    ...
+
+wellknown_router, agentadmit_router = create_agentadmit_router(...)
+app.include_router(wellknown_router)
+app.include_router(agentadmit_router, prefix="/agentadmit")
+
+# ❌ WRONG — custom route registered AFTER SDK router (shadowed, never reached)
+wellknown_router, agentadmit_router = create_agentadmit_router(...)
+app.include_router(agentadmit_router, prefix="/agentadmit")  # SDK route wins
+@app.get("/agentadmit/scopes")  # never reached
+async def my_scopes(): ...
+```
+
+**Tip:** Use the `filter_scopes_for_user` callback parameter on
+`create_agentadmit_router()` as a cleaner alternative to overriding `/scopes`
+entirely — the SDK handles the endpoint and calls your function to filter results.
+
 ## Documentation
 
 Full integration guide: https://agentadmit.com/docs/app-owner-guide

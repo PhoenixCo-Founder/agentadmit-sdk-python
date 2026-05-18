@@ -12,6 +12,7 @@ Call create_agentadmit_router() and include the returned routers in your FastAPI
 """
 
 import logging
+import secrets
 from typing import Callable, Optional
 
 import httpx
@@ -78,6 +79,7 @@ def create_agentadmit_router(
     get_user_tier: Callable = None,
     validate_scopes: Callable = None,
     get_endpoints_for_scopes: Callable = None,
+    filter_scopes_for_user: Callable = None,
 ) -> tuple[APIRouter, APIRouter]:
     """
     Create the AgentAdmit FastAPI routers.
@@ -88,6 +90,10 @@ def create_agentadmit_router(
         get_user_tier: Function(user_dict) -> str. Returns the user's subscription tier.
         validate_scopes: Function(scopes: list, user_dict) -> tuple[bool, list].
         get_endpoints_for_scopes: Function(scopes: list) -> list[dict].
+        filter_scopes_for_user: Optional Function(scopes: list[dict], user: dict) ->
+            tuple[list[dict], dict]. If provided, the /scopes endpoint becomes user-aware.
+            Returns (filtered_scopes, metadata) where metadata may contain
+            {"user_role": str, "user_tier": str, "total_platform": int}.
 
     Returns:
         Tuple of (wellknown_router, agentadmit_router).
@@ -141,12 +147,24 @@ def create_agentadmit_router(
 
     # ── Scopes ───────────────────────────────────────────────────────────────
 
-    @agentadmit_router.get("/scopes", summary="Available scopes and roles")
-    async def scopes_endpoint():
-        return {
-            "scopes": get_scope_metadata(),
-            "roles": list(set(s.role for s in config.scopes)),
-        }
+    if filter_scopes_for_user is not None and get_current_user is not None:
+        @agentadmit_router.get("/scopes", summary="Available scopes and roles (user-filtered)")
+        async def scopes_endpoint(current_user: dict = Depends(get_current_user)):
+            all_scopes = get_scope_metadata()
+            roles = list(set(s.role for s in config.scopes))
+            try:
+                filtered, meta = filter_scopes_for_user(all_scopes, current_user)
+                return {"scopes": filtered, "roles": roles, **meta}
+            except Exception as exc:
+                logger.warning("filter_scopes_for_user raised: %s — returning all scopes", exc)
+                return {"scopes": all_scopes, "roles": roles}
+    else:
+        @agentadmit_router.get("/scopes", summary="Available scopes and roles")
+        async def scopes_endpoint():
+            return {
+                "scopes": get_scope_metadata(),
+                "roles": list(set(s.role for s in config.scopes)),
+            }
 
     # ── Generate Connection Token (user-authenticated) ───────────────────────
     # Calls the AgentAdmit hosted service to create the token.
@@ -206,8 +224,10 @@ def create_agentadmit_router(
         token_data = resp.json()
 
         # Store local record for the connections list
+        # Use hosted service's connection_id if provided; generate a local one as fallback
+        # (prevents MongoDB duplicate key on connection_id: "unknown" when hosting service omits it)
         storage.store_connection({
-            "connection_id": token_data.get("connection_id", "unknown"),
+            "connection_id": token_data.get("connection_id") or f"conn_{secrets.token_urlsafe(16)}",
             "user_id": str(user_id),
             "scopes": body.scopes,
             "role": role,
@@ -348,18 +368,29 @@ def create_agentadmit_router(
         user_id = current_user.get(config.user_lookup_field)
         connections = storage.list_connections(str(user_id))
 
+        def _serialize_dt(value):
+            """Serialize a date/datetime value to ISO-8601 string, or None if missing."""
+            if value is None:
+                return None
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+            s = str(value)
+            return s if s else None
+
         result = []
         for c in connections:
+            agent_label = c.get("agent_label")
             result.append({
                 "connection_id": c.get("connection_id"),
                 "scopes": c.get("scopes", []),
                 "role": c.get("role", "user"),
-                "agent_label": c.get("agent_label"),
+                "agent_label": agent_label,
+                "label": agent_label,  # alias for frontend compatibility
                 "agent_id": c.get("agent_id"),
                 "status": c.get("status"),
-                "created_at": str(c.get("created_at", "")),
-                "last_used": str(c.get("last_used", "")) if c.get("last_used") else None,
-                "expires_at": str(c.get("expires_at", "")) if c.get("expires_at") else None,
+                "created_at": _serialize_dt(c.get("created_at")),
+                "last_used": _serialize_dt(c.get("last_used")),
+                "expires_at": _serialize_dt(c.get("expires_at")),
                 "duration_seconds": c.get("duration_seconds"),
             })
 
