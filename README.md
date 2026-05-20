@@ -119,9 +119,10 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
     resp = requests.post(
         AGENTADMIT_VERIFY_URL,
         headers={
-            "Authorization": f"Bearer {token}",
-            "X-Api-Key": AGENTADMIT_API_KEY,
+            "Authorization": f"Bearer {AGENTADMIT_API_KEY}",
+            "Content-Type": "application/json",
         },
+        json={"token": token},
         timeout=5,
     )
     if resp.status_code != 200:

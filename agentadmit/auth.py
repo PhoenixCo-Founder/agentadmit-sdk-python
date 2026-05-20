@@ -87,16 +87,16 @@ def _introspect_with_retry(
     import requests as _requests
 
     headers = {
-        "Authorization": f"Bearer {token}",
-        "X-App-Id": app_id,
-        "X-Api-Key": api_key,
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
+    payload = {"token": token}
 
     delay = 1.0  # seconds — initial backoff
 
     for attempt in range(max_retries + 1):
         try:
-            response = _requests.post(url, headers=headers, timeout=timeout)
+            response = _requests.post(url, headers=headers, json=payload, timeout=timeout)
         except _requests.exceptions.RequestException as exc:
             logger.error("AgentAdmit introspection failed (network): %s", exc)
             raise HTTPException(
