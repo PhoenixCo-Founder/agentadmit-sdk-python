@@ -117,10 +117,10 @@ def _validate_agent_token(token: str) -> dict:
         resp = _requests.post(
             _config.agentadmit_verify_url,
             headers={
-                "Authorization": f"Bearer {token}",
-                "X-App-Id": _config.app_id,
-                "X-Api-Key": _config.api_key,
+                "Authorization": f"Bearer {_config.api_key}",
+                "Content-Type": "application/json",
             },
+            json={"token": token},
             timeout=5,
         )
     except _requests.exceptions.RequestException as exc:
@@ -134,6 +134,12 @@ def _validate_agent_token(token: str) -> dict:
         raise ValueError(f"Verification service returned {resp.status_code}")
 
     data = resp.json()
+
+    # Check active flag (RFC 7662 introspection pattern).
+    if not data.get("active"):
+        reason = data.get("error", "invalid_token")
+        raise ValueError(f"Token is not active: {reason}")
+
     scopes = data.get("scopes", [])
     user_id = data.get("user_id")
     connection_id = data.get("connection_id")
