@@ -252,6 +252,16 @@ def get_agentadmit_user(
 
     introspection_data = verify_response.json()
 
+    # Check active flag (RFC 7662 introspection pattern).
+    # The verify endpoint returns {active: false} with HTTP 200 for invalid/
+    # expired/revoked tokens. Without this check, we'd read empty scopes.
+    if not introspection_data.get("active"):
+        reason = introspection_data.get("error", "invalid_token")
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": f"Token is not active: {reason}"},
+        )
+
     # Extract validated data from introspection response
     scopes = introspection_data.get("scopes", [])
     user_id = introspection_data.get("user_id")
