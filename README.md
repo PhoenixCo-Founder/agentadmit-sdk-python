@@ -259,3 +259,49 @@ For complete compliance guidance, see our [compliance guide](https://agentadmit.
 ## License
 
 All rights reserved. Patent pending.
+
+## Security Alerts
+
+Monitor suspicious agent activity with the AgentAdmit alerts API. Six alert types are supported:
+- `volume_spike` — unusual request volume
+- `failed_scope_attempts` — repeated scope access failures
+- `burst_pattern` — rapid burst of requests
+- `stale_reactivation` — dormant connection suddenly active
+- `new_scope_usage` — agent using a scope for the first time
+- `revoked_connection_attempt` — revoked connection trying to authenticate
+
+### Configure Alert Thresholds
+
+```python
+from agentadmit import configure_alerts
+
+result = configure_alerts(
+    app_id="app_abc123",
+    alert_type="volume_spike",
+    enabled=True,
+    threshold_value=100,
+    threshold_window_minutes=5,
+    kill_switch_enabled=True,
+    kill_switch_threshold_value=500,
+    kill_switch_threshold_window_minutes=10,
+)
+# {"ok": True, "config": {...}}
+```
+
+### List Alert Events
+
+```python
+from agentadmit import list_alerts
+
+events = list_alerts(app_id="app_abc123", alert_type="volume_spike", limit=50)
+# {"events": [...], "total": 12, "limit": 50, "offset": 0}
+```
+
+### Get Current Config
+
+```python
+from agentadmit import get_alert_config
+
+config = get_alert_config(app_id="app_abc123")
+conn_config = get_alert_config(app_id="app_abc123", connection_id="conn_xyz")
+```
