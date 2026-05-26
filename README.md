@@ -305,3 +305,12 @@ from agentadmit import get_alert_config
 config = get_alert_config(app_id="app_abc123")
 conn_config = get_alert_config(app_id="app_abc123", connection_id="conn_xyz")
 ```
+
+
+### Notifying Your Users
+
+AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data — you deliver it through your own system (in-app notifications, email, push, etc.).
+
+- **Poll alerts** — Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
+- **Webhook delivery (coming soon)** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server.
+- **React SDK** — Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.
