@@ -1,11 +1,12 @@
 Metadata-Version: 2.4
 Name: agentadmit
-Version: 0.1.0
+Version: 1.0.0
 Summary: AgentAdmit SDK — User-mediated AI agent authorization for any app
 Author: Christopher Emerson
-License: All rights reserved
+License: Proprietary
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: fastapi<1.0.0,>=0.100.0
 Requires-Dist: PyJWT<3.0.0,>=2.8.0
 Requires-Dist: cryptography<45.0.0,>=41.0.0
@@ -17,10 +18,14 @@ Provides-Extra: dev
 Requires-Dist: pytest<9.0,>=7.0; extra == "dev"
 Requires-Dist: httpx<1.0.0,>=0.24.0; extra == "dev"
 Requires-Dist: uvicorn<1.0.0,>=0.23.0; extra == "dev"
+Dynamic: license-file
 
 # AgentAdmit SDK for Python
 
 User-mediated AI agent authorization for Python apps. Supports **FastAPI**, **Flask**, and **Django**.
+
+> **Get started:** Sign up at [agentadmit.com](https://agentadmit.com) → Get your test keys → Install the SDK → Build.
+> Test keys are available immediately after signup. Live keys become available when you subscribe an app.
 
 ## Quick Start
 
@@ -139,9 +144,10 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
     resp = requests.post(
         AGENTADMIT_VERIFY_URL,
         headers={
-            "Authorization": f"Bearer {token}",
-            "X-Api-Key": AGENTADMIT_API_KEY,
+            "Authorization": f"Bearer {AGENTADMIT_API_KEY}",
+            "Content-Type": "application/json",
         },
+        json={"token": token},
         timeout=5,
     )
     if resp.status_code != 200:
@@ -219,9 +225,61 @@ except RateLimitError as e:
 - `remaining` — `X-RateLimit-Remaining` header value (or `None`)
 - `reset` — `X-RateLimit-Reset` Unix timestamp (or `None`)
 
+## Route Registration Order (FastAPI)
+
+When using `create_agentadmit_router()`, the SDK registers default endpoints for
+`/agentadmit/scopes`, `/agentadmit/connections/generate-token`, etc.
+
+If you need to **override** any SDK endpoint with your own (e.g., a user-aware
+`/scopes` endpoint), register your route **before** calling `app.include_router()`.
+FastAPI resolves routes in registration order — the first matching route wins.
+
+```python
+# ✅ CORRECT — custom /scopes registered before SDK router
+@app.get("/agentadmit/scopes")
+async def my_scopes(current_user: dict = Depends(get_current_user)):
+    # your user-aware logic
+    ...
+
+wellknown_router, agentadmit_router = create_agentadmit_router(...)
+app.include_router(wellknown_router)
+app.include_router(agentadmit_router, prefix="/agentadmit")
+
+# ❌ WRONG — custom route registered AFTER SDK router (shadowed, never reached)
+wellknown_router, agentadmit_router = create_agentadmit_router(...)
+app.include_router(agentadmit_router, prefix="/agentadmit")  # SDK route wins
+@app.get("/agentadmit/scopes")  # never reached
+async def my_scopes(): ...
+```
+
+**Tip:** Use the `filter_scopes_for_user` callback parameter on
+`create_agentadmit_router()` as a cleaner alternative to overriding `/scopes`
+entirely — the SDK handles the endpoint and calls your function to filter results.
+
 ## Documentation
 
 Full integration guide: https://agentadmit.com/docs/app-owner-guide
+
+
+## Data Collection & Privacy
+
+The AgentAdmit Python SDK runs server-side and does not interact with app stores or end-user devices directly.
+
+### What the SDK does
+- Validates AgentAdmit tokens presented by AI agents
+- Enforces scope-based access control on your API routes
+- Manages connection lifecycle (create, revoke, audit)
+
+### What the SDK does NOT do
+- Does not collect end-user data
+- Does not send telemetry or analytics
+- Does not phone home to AgentAdmit servers (all operations use your configured keys and storage)
+- Does not track users or devices
+
+### Privacy impact
+Since this SDK runs on your server, it has no direct App Store or Play Store compliance surface. Your client-side integration (e.g., the AgentAdmit React SDK) handles privacy manifest and data safety requirements.
+
+For complete compliance guidance, see our [compliance guide](https://agentadmit.com/docs/compliance).
 
 ## License
 

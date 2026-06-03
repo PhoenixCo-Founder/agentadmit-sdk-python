@@ -21,7 +21,7 @@ class GenerateTokenRequest(BaseModel):
         ge=300,          # min 5 minutes
         le=315360000,    # max ~10 years
     )
-    label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'Phoenix — Workout Tracker')")
+    label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'MyAssistant — Workout Tracker')")
 
 
 class GenerateTokenResponse(BaseModel):
@@ -46,8 +46,8 @@ class TokenExchangeRequest(BaseModel):
         None,
         description="The ag_ct_ connection token received from the user",
     )
-    agent_id: Optional[str] = Field(None, description="Agent identifier (e.g., 'openclaw-main')")
-    agent_label: Optional[str] = Field(None, description="Human-readable agent name (e.g., 'Phoenix')")
+    agent_id: Optional[str] = Field(None, description="Agent identifier (e.g., 'my-assistant-v1')")
+    agent_label: Optional[str] = Field(None, description="Human-readable agent name (e.g., 'MyAssistant')")
     agent_metadata: Optional[dict[str, Any]] = Field(None, description="Optional agent metadata")
 
 
