@@ -31,6 +31,12 @@ from agentadmit.auth import (
 )
 from agentadmit.routes import create_agentadmit_router
 # keys.py is deprecated — AgentAdmit is a hosted service, no local keys needed
+from agentadmit.alerts import (
+    configure_alerts,
+    list_alerts,
+    get_alert_config,
+    ALERT_TYPES,
+)
 from agentadmit.exceptions import (
     AgentAdmitError,
     InvalidTokenError,
@@ -51,6 +57,12 @@ __all__ = [
     "log_agent_access",
     "check_connection_cap",
     "create_agentadmit_router",
+
+    # Alerts API
+    "configure_alerts",
+    "list_alerts",
+    "get_alert_config",
+    "ALERT_TYPES",
 
     "AgentAdmitError",
     "InvalidTokenError",
