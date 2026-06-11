@@ -37,6 +37,11 @@ from agentadmit.alerts import (
     get_alert_config,
     ALERT_TYPES,
 )
+from agentadmit.models import VERIFY_ERROR_CODES
+from agentadmit.webhooks import (
+    verify_webhook_signature,
+    is_valid_webhook_signature,
+)
 from agentadmit.exceptions import (
     AgentAdmitError,
     InvalidTokenError,
@@ -44,6 +49,7 @@ from agentadmit.exceptions import (
     ConnectionRevokedError,
     ConnectionLimitError,
     ConfigurationError,
+    WebhookSignatureError,
 )
 
 __all__ = [
@@ -64,10 +70,16 @@ __all__ = [
     "get_alert_config",
     "ALERT_TYPES",
 
+    # Verify error codes + webhook signature verification
+    "VERIFY_ERROR_CODES",
+    "verify_webhook_signature",
+    "is_valid_webhook_signature",
+
     "AgentAdmitError",
     "InvalidTokenError",
     "InsufficientScopeError",
     "ConnectionRevokedError",
     "ConnectionLimitError",
     "ConfigurationError",
+    "WebhookSignatureError",
 ]

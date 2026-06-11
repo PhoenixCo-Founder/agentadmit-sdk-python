@@ -40,18 +40,20 @@ logger = logging.getLogger(__name__)
 AGENTADMIT_VERSION = "0.1"
 
 
-def _call_hosted_service(method: str, path: str, json: dict = None, timeout: float = 10.0) -> httpx.Response:
+def _call_hosted_service(method: str, path: str, json: dict = None, timeout: float = 10.0, authenticated: bool = True) -> httpx.Response:
     """
-    Make an authenticated request to the AgentAdmit hosted service.
-    Uses the app's API key for server-to-server auth.
+    Make a request to the AgentAdmit hosted service.
+    Uses the app's API key for server-to-server auth, except for /exchange
+    (authenticated=False) where the connection token itself is the credential.
     """
     config = get_config()
     url = f"{config.agentadmit_api_url.rstrip('/')}{path}"
     headers = {
-        "Authorization": f"Bearer {config.api_key}",
         "Content-Type": "application/json",
         "X-App-Id": config.app_id,
     }
+    if authenticated:
+        headers["Authorization"] = f"Bearer {config.api_key}"
     try:
         with httpx.Client(timeout=timeout) as client:
             if method.upper() == "GET":
@@ -190,10 +192,6 @@ def create_agentadmit_router(
                 },
             )
 
-        duration = body.duration_seconds or config.connection_token_ttl
-        if duration < 300:
-            raise HTTPException(status_code=400, detail={"error": "invalid_request", "error_description": "duration_seconds must be at least 300 (5 minutes)"})
-
         user_id = current_user.get(config.user_lookup_field)
         role = determine_role(current_user)
         user_tier = get_user_tier(current_user)
@@ -201,18 +199,18 @@ def create_agentadmit_router(
         # Check connection cap locally (fast fail)
         check_connection_cap(user_id, user_tier)
 
-        # Call AgentAdmit hosted service to generate the connection token
-        resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json={
+        # Call AgentAdmit hosted service to generate the connection token.
+        # duration_seconds is tri-state: omitted → hosted default (30 days);
+        # explicit null → until revoked; integer → explicit duration.
+        payload = {
             "user_id": str(user_id),
             "scopes": body.scopes,
-            "duration_hours": max(1, duration // 3600),
-            "label": body.label,
-            "user_role": role,
-            "metadata": {
-                "subscription_tier": user_tier,
-                "app_name": config.app_name,
-            },
-        })
+            "role": role,
+        }
+        if "duration_seconds" in body.model_fields_set:
+            payload["duration_seconds"] = body.duration_seconds
+
+        resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json=payload)
 
         if resp.status_code not in (200, 201):
             logger.error("Hosted token generation failed: %s %s", resp.status_code, resp.text[:500])
@@ -232,15 +230,15 @@ def create_agentadmit_router(
             "scopes": body.scopes,
             "role": role,
             "agent_label": body.label,
-            "duration_seconds": duration,
+            "duration_seconds": body.duration_seconds if "duration_seconds" in body.model_fields_set else None,
             "status": "active",
         })
 
         logger.info("Connection token generated via hosted service for user %s with %d scopes", user_id, len(body.scopes))
 
         return GenerateTokenResponse(
-            connection_token=token_data.get("token") or token_data.get("connection_token"),
-            expires_in=duration,
+            connection_token=token_data.get("token"),
+            expires_in=token_data.get("expires_in") or config.connection_token_ttl,
             scopes=body.scopes,
         )
 
@@ -262,13 +260,14 @@ def create_agentadmit_router(
                 detail={"error": "invalid_request", "error_description": "connection_token is required"},
             )
 
-        # Forward the exchange to the AgentAdmit hosted service
+        # Forward the exchange to the AgentAdmit hosted service.
+        # No API key on this call — the connection token is the credential.
         resp = _call_hosted_service("POST", "/api/v1/exchange", json={
             "token": body.connection_token,
             "agent_label": body.agent_label,
             "agent_id": body.agent_id,
             "agent_metadata": body.agent_metadata,
-        })
+        }, authenticated=False)
 
         if resp.status_code != 200:
             detail = {"error": "exchange_failed", "error_description": "Token exchange failed"}

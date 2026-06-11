@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ class AgentAdmitConfig(BaseModel):
 
     # Hosted service connection (REQUIRED — no self-hosted mode)
     agentadmit_api_url: str = "https://api.agentadmit.com"
-    agentadmit_verify_url: str = "https://api.agentadmit.com/v1/verify"
+    agentadmit_verify_url: str = "https://api.agentadmit.com/api/v1/verify"
     api_key: str = ""  # aa_live_xxxx or aa_test_xxxx — from AgentAdmit dashboard
 
     # Keys (managed by AgentAdmit — app owner does NOT generate these)
@@ -116,6 +116,14 @@ class AgentAdmitConfig(BaseModel):
 
     # Rate limiting — introspection retry policy
     max_retries: int = 3  # max retries on 429 before raising RateLimitError
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key_prefix(cls, v: str) -> str:
+        if v and not (v.startswith("aa_test_") or v.startswith("aa_live_")):
+            # Never echo the key itself.
+            raise ValueError("api_key must start with 'aa_test_' or 'aa_live_'")
+        return v
 
 
 # ---------------------------------------------------------------------------

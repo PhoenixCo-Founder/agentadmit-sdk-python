@@ -298,7 +298,6 @@ def generate_token_view(request):
 
     data = json.loads(request.body)
     scopes = data.get("scopes", [])
-    duration = data.get("duration_seconds", _config.connection_token_ttl)
 
     all_valid, invalid = _validate_scopes(scopes, current_user)
     if not all_valid:
@@ -306,6 +305,16 @@ def generate_token_view(request):
 
     user_id = current_user.get(_config.user_lookup_field)
     role = _determine_role(current_user)
+
+    # duration_seconds is tri-state: key absent → hosted default (30 days);
+    # explicit null → until revoked; integer → explicit duration.
+    payload = {
+        "user_id": str(user_id),
+        "scopes": scopes,
+        "role": role,
+    }
+    if "duration_seconds" in data:
+        payload["duration_seconds"] = data["duration_seconds"]
 
     try:
         resp = _requests.post(
@@ -315,13 +324,7 @@ def generate_token_view(request):
                 "Content-Type": "application/json",
                 "X-App-Id": _config.app_id,
             },
-            json={
-                "user_id": str(user_id),
-                "scopes": scopes,
-                "duration_hours": max(1, duration // 3600),
-                "label": data.get("label"),
-                "user_role": role,
-            },
+            json=payload,
             timeout=10,
         )
     except _requests.exceptions.RequestException as exc:
@@ -333,8 +336,8 @@ def generate_token_view(request):
 
     token_data = resp.json()
     return JsonResponse({
-        "connection_token": token_data.get("token") or token_data.get("connection_token"),
-        "expires_in": duration,
+        "connection_token": token_data.get("token"),
+        "expires_in": token_data.get("expires_in") or _config.connection_token_ttl,
         "scopes": scopes,
     })
 
@@ -354,10 +357,10 @@ def token_exchange_view(request):
         return JsonResponse({"error": "invalid_request"}, status=400)
 
     try:
+        # No API key on /exchange — the connection token is the credential.
         resp = _requests.post(
             f"{_config.agentadmit_api_url.rstrip('/')}/api/v1/exchange",
             headers={
-                "Authorization": f"Bearer {_config.api_key}",
                 "Content-Type": "application/json",
                 "X-App-Id": _config.app_id,
             },

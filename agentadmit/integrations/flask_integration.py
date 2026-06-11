@@ -264,7 +264,6 @@ class AgentAdmitFlask:
 
             data = request.get_json()
             scopes = data.get("scopes", [])
-            duration = data.get("duration_seconds", aa.config.connection_token_ttl)
 
             all_valid, invalid = aa._validate_scopes(scopes, current_user)
             if not all_valid:
@@ -272,6 +271,16 @@ class AgentAdmitFlask:
 
             user_id = current_user.get(aa.config.user_lookup_field)
             role = aa._determine_role(current_user)
+
+            # duration_seconds is tri-state: key absent → hosted default (30
+            # days); explicit null → until revoked; integer → explicit duration.
+            payload = {
+                "user_id": str(user_id),
+                "scopes": scopes,
+                "role": role,
+            }
+            if "duration_seconds" in data:
+                payload["duration_seconds"] = data["duration_seconds"]
 
             try:
                 resp = _requests.post(
@@ -281,13 +290,7 @@ class AgentAdmitFlask:
                         "Content-Type": "application/json",
                         "X-App-Id": aa.config.app_id,
                     },
-                    json={
-                        "user_id": str(user_id),
-                        "scopes": scopes,
-                        "duration_hours": max(1, duration // 3600),
-                        "label": data.get("label"),
-                        "user_role": role,
-                    },
+                    json=payload,
                     timeout=10,
                 )
             except _requests.exceptions.RequestException as exc:
@@ -299,8 +302,8 @@ class AgentAdmitFlask:
 
             token_data = resp.json()
             return jsonify({
-                "connection_token": token_data.get("token") or token_data.get("connection_token"),
-                "expires_in": duration,
+                "connection_token": token_data.get("token"),
+                "expires_in": token_data.get("expires_in") or aa.config.connection_token_ttl,
                 "scopes": scopes,
             })
 
@@ -317,10 +320,10 @@ class AgentAdmitFlask:
                 return jsonify({"error": "invalid_request", "error_description": "connection_token required"}), 400
 
             try:
+                # No API key on /exchange — the connection token is the credential.
                 resp = _requests.post(
                     f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/exchange",
                     headers={
-                        "Authorization": f"Bearer {aa.config.api_key}",
                         "Content-Type": "application/json",
                         "X-App-Id": aa.config.app_id,
                     },

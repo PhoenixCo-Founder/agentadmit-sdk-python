@@ -88,7 +88,7 @@ def get_orders():
 AGENTADMIT = {
     'APP_ID': 'app_yourappid',
     'API_KEY': 'aa_test_yourkey',
-    'VERIFY_URL': 'https://api.agentadmit.com/v1/verify',
+    'VERIFY_URL': 'https://api.agentadmit.com/api/v1/verify',
 }
 
 # views.py
@@ -109,7 +109,7 @@ For **STDIO transport** (most MCP servers), the agent includes the token in tool
 import requests
 import os
 
-AGENTADMIT_VERIFY_URL = "https://api.agentadmit.com/v1/verify"
+AGENTADMIT_VERIFY_URL = "https://api.agentadmit.com/api/v1/verify"
 AGENTADMIT_API_KEY = os.environ["AGENTADMIT_API_KEY"]
 
 def handle_tool_call(name: str, arguments: dict) -> dict:
@@ -315,5 +315,25 @@ conn_config = get_alert_config(app_id="app_abc123", connection_id="conn_xyz")
 AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data — you deliver it through your own system (in-app notifications, email, push, etc.).
 
 - **Poll alerts** — Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
-- **Webhook delivery (coming soon)** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server.
+- **Webhook delivery** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_…` secret. Always verify the signature before trusting the payload:
+
+  ```python
+  from agentadmit import verify_webhook_signature, WebhookSignatureError
+
+  @app.post("/agentadmit/alerts")
+  async def alerts(request: Request):
+      payload = await request.body()
+      try:
+          verify_webhook_signature(
+              payload,
+              request.headers.get("X-AgentAdmit-Signature", ""),
+              secret=os.environ["AGENTADMIT_WEBHOOK_SECRET"],  # whsec_…
+          )
+      except WebhookSignatureError:
+          return JSONResponse({"error": "invalid_signature"}, status_code=400)
+      event = json.loads(payload)
+      ...
+  ```
+
+  The header format is `t=<unix_ts>,v1=<hex>` — an HMAC-SHA256 of `{t}.{raw_body}` keyed with your signing secret. The helper compares in constant time and rejects timestamps more than 5 minutes off (replay protection).
 - **React SDK** — Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.

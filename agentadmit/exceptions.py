@@ -53,6 +53,12 @@ class ConfigurationError(AgentAdmitError):
         super().__init__(message)
 
 
+class WebhookSignatureError(AgentAdmitError):
+    """Inbound alert webhook failed X-AgentAdmit-Signature verification."""
+    def __init__(self, message: str = "Webhook signature verification failed"):
+        super().__init__(message)
+
+
 class RateLimitError(AgentAdmitError):
     """
     The AgentAdmit introspection endpoint returned 429 Too Many Requests

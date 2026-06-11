@@ -30,7 +30,7 @@ api_base_url: "http://localhost:8000"  # Your app's base URL
 
 # AgentAdmit hosted service URLs (do not change unless instructed)
 agentadmit_api_url: "https://api.agentadmit.com"
-agentadmit_verify_url: "https://api.agentadmit.com/v1/verify"
+agentadmit_verify_url: "https://api.agentadmit.com/api/v1/verify"
 
 # Route prefix for AgentAdmit endpoints on your app
 route_prefix: "/agentadmit"
@@ -132,7 +132,7 @@ def cmd_check(args):
         if config.agentadmit_verify_url:
             print(f"Verify URL: {config.agentadmit_verify_url}")
         else:
-            print("Verify URL: NOT SET — defaults to https://api.agentadmit.com/v1/verify")
+            print("Verify URL: NOT SET — defaults to https://api.agentadmit.com/api/v1/verify")
 
         if len(config.scopes) == 0:
             print()

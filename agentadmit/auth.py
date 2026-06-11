@@ -255,11 +255,13 @@ def get_agentadmit_user(
     # Check active flag (RFC 7662 introspection pattern).
     # The verify endpoint returns {active: false} with HTTP 200 for invalid/
     # expired/revoked tokens. Without this check, we'd read empty scopes.
+    # The error code is one of VERIFY_ERROR_CODES (e.g. token_expired,
+    # connection_expired, environment_mismatch); unknown codes pass through.
     if not introspection_data.get("active"):
         reason = introspection_data.get("error", "invalid_token")
         raise HTTPException(
-            status_code=401,
-            detail={"error": "invalid_token", "error_description": f"Token is not active: {reason}"},
+            status_code=403 if reason == "insufficient_scope" else 401,
+            detail={"error": reason, "error_description": f"Token is not active: {reason}"},
         )
 
     # Extract validated data from introspection response

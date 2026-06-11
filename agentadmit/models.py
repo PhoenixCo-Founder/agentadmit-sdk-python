@@ -9,6 +9,22 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
+# Verify (introspection) error codes — returned by the hosted service as
+# {"active": false, "error": <code>} with HTTP 200.
+# ---------------------------------------------------------------------------
+
+VERIFY_ERROR_CODES = (
+    "invalid_token",
+    "token_expired",
+    "token_revoked",
+    "connection_revoked",
+    "connection_expired",
+    "environment_mismatch",
+    "insufficient_scope",
+)
+
+
+# ---------------------------------------------------------------------------
 # Token generation (user-authenticated)
 # ---------------------------------------------------------------------------
 
@@ -17,9 +33,13 @@ class GenerateTokenRequest(BaseModel):
     scopes: list[str] = Field(..., description="List of scopes to grant the agent")
     duration_seconds: Optional[int] = Field(
         None,
-        description="How long the access token should last (seconds). None = use default.",
-        ge=300,          # min 5 minutes
-        le=315360000,    # max ~10 years
+        description=(
+            "Connection duration in seconds (60–31536000). "
+            "Omit the field for the AgentAdmit default (30 days). "
+            "Pass an explicit null for an until-revoked connection."
+        ),
+        ge=60,           # min 1 minute (hosted service contract)
+        le=31536000,     # max 1 year (hosted service contract)
     )
     label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'MyAssistant — Workout Tracker')")
 
