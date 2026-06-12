@@ -17,7 +17,7 @@ Quick Start:
         ...
 """
 
-__version__ = "0.1.0"
+from agentadmit._version import __version__
 
 from agentadmit.config import AgentAdmitConfig, load_config
 from agentadmit.middleware import AgentAdmitMiddleware
