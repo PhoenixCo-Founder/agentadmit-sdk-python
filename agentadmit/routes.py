@@ -37,7 +37,7 @@ from agentadmit.models import (
 
 logger = logging.getLogger(__name__)
 
-AGENTADMIT_VERSION = "0.1"
+from agentadmit._version import __version__ as AGENTADMIT_VERSION
 
 
 def _call_hosted_service(method: str, path: str, json: dict = None, timeout: float = 10.0, authenticated: bool = True) -> httpx.Response:
@@ -262,12 +262,18 @@ def create_agentadmit_router(
 
         # Forward the exchange to the AgentAdmit hosted service.
         # No API key on this call — the connection token is the credential.
-        resp = _call_hosted_service("POST", "/api/v1/exchange", json={
-            "token": body.connection_token,
-            "agent_label": body.agent_label,
-            "agent_id": body.agent_id,
-            "agent_metadata": body.agent_metadata,
-        }, authenticated=False)
+        # Optional fields must be OMITTED when absent: the hosted /api/v1/exchange
+        # rejects explicit JSON nulls ("Expected string, received null").
+        payload = {"token": body.connection_token}
+        if body.agent_label is not None:
+            payload["agent_label"] = body.agent_label
+        if body.agent_id is not None:
+            payload["agent_id"] = body.agent_id
+        if body.agent_metadata is not None:
+            payload["agent_metadata"] = body.agent_metadata
+
+        resp = _call_hosted_service("POST", "/api/v1/exchange", json=payload,
+                                    authenticated=False)
 
         if resp.status_code != 200:
             detail = {"error": "exchange_failed", "error_description": "Token exchange failed"}
