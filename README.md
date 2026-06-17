@@ -244,15 +244,17 @@ Full integration guide: https://agentadmit.com/docs/app-owner-guide
 The AgentAdmit Python SDK runs server-side and does not interact with app stores or end-user devices directly.
 
 ### What the SDK does
-- Validates AgentAdmit tokens presented by AI agents
+- Validates AgentAdmit tokens by calling AgentAdmit's hosted introspection endpoint (`https://api.agentadmit.com/api/v1/verify`) on every agent request — this is mandatory introspection; there is no local or offline validation mode
 - Enforces scope-based access control on your API routes
-- Manages connection lifecycle (create, revoke, audit)
+- Manages connection lifecycle (create, revoke, audit) using your configured storage backend
 
 ### What the SDK does NOT do
-- Does not collect end-user data
-- Does not send telemetry or analytics
-- Does not phone home to AgentAdmit servers (all operations use your configured keys and storage)
-- Does not track users or devices
+- Does not transmit raw end-user PII (such as name, email, or device identifiers) — each introspection request sends the opaque access token and your API key
+- Does not perform passive background telemetry or analytics — network calls occur only during active token validation
+- Does not maintain its own persistent storage — local state (connections, audit log) lives in the storage backend you configure
+
+### What the AgentAdmit hosted service records
+On every token validation, AgentAdmit's `/api/v1/verify` endpoint receives the access token and API key, resolves the token to its `user_id`, `connection_id`, granted `scopes`, and `agent_label`, and records per-call metadata (including the endpoint and timestamp) for billing, audit logging, the security alerts engine, and usage metering. This is integral to how AgentAdmit works and applies to both test and live keys. See the "Mandatory introspection" notes above and the [compliance guide](https://agentadmit.com/docs/compliance) for the full data-handling description.
 
 ### Privacy impact
 Since this SDK runs on your server, it has no direct App Store or Play Store compliance surface. Your client-side integration (e.g., the AgentAdmit React SDK) handles privacy manifest and data safety requirements.
