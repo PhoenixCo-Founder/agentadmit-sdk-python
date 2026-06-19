@@ -129,8 +129,11 @@ def handle_tool_call(name: str, arguments: dict) -> dict:
         timeout=5,
     )
     if resp.status_code != 200:
-        raise PermissionError("Invalid or expired token")
+        raise RuntimeError(f"AgentAdmit verification failed: {resp.status_code}")
     ctx = resp.json()
+    # Invalid / expired / revoked tokens return HTTP 200 with active: false
+    if not ctx.get("active"):
+        raise PermissionError("Invalid or expired token")
     
     # 3. Check scope for this tool
     required_scope = SCOPE_MAP.get(name)
