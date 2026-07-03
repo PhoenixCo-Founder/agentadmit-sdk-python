@@ -25,7 +25,7 @@ def aa_app(monkeypatch, tmp_path):
         "app_id: app_test",
         "app_name: Test App",
         "api_key: aa_test_dummy",
-        "api_base_url: http://testserver",
+        "api_base_url: http://localhost:8000",
         "agentadmit_api_url: https://agentadmit.example",
         "storage:",
         "  backend: memory",

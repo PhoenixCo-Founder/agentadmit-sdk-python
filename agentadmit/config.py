@@ -11,11 +11,40 @@ import os
 import logging
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# URL validation helpers
+# ---------------------------------------------------------------------------
+
+_LOCALHOST_HOSTS = {"localhost", "127.0.0.1", "::1"}  # urlparse strips [] from [::1]
+
+
+def _require_https(value: str, field_name: str = "url") -> str:
+    """
+    Raise ConfigurationError if *value* is a non-empty URL that uses a scheme
+    other than https, unless the host is localhost / 127.0.0.1 / [::1]
+    (http is allowed there for local development).
+
+    Empty strings are allowed — the caller may not have set the URL yet.
+    """
+    if not value:
+        return value
+    parsed = urlparse(value)
+    if parsed.scheme == "https":
+        return value
+    if parsed.scheme == "http" and parsed.hostname in _LOCALHOST_HOSTS:
+        return value
+    from agentadmit.exceptions import ConfigurationError
+    raise ConfigurationError(
+        f"{field_name} must use https (got {value!r}). "
+        "http is only allowed for localhost / 127.0.0.1 / [::1] in local development."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +153,21 @@ class AgentAdmitConfig(BaseModel):
             # Never echo the key itself.
             raise ValueError("api_key must start with 'aa_test_' or 'aa_live_'")
         return v
+
+    @field_validator("agentadmit_api_url")
+    @classmethod
+    def _validate_api_url_https(cls, v: str) -> str:
+        return _require_https(v, "agentadmit_api_url")
+
+    @field_validator("agentadmit_verify_url")
+    @classmethod
+    def _validate_verify_url_https(cls, v: str) -> str:
+        return _require_https(v, "agentadmit_verify_url")
+
+    @field_validator("api_base_url")
+    @classmethod
+    def _validate_base_url_https(cls, v: str) -> str:
+        return _require_https(v, "api_base_url")
 
 
 # ---------------------------------------------------------------------------

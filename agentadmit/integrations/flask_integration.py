@@ -127,18 +127,38 @@ class AgentAdmitFlask:
 
         data = resp.json()
 
-        # Check active flag (RFC 7662 introspection pattern).
-        if not data.get("active"):
+        # Check active flag — must be the boolean True, not just truthy.
+        if data.get("active") is not True:
             reason = data.get("error", "invalid_token")
             raise ValueError(f"Token is not active: {reason}")
 
+        # M5: Validate field types to block NoSQL-injection via crafted responses.
         scopes = data.get("scopes", [])
         user_id = data.get("user_id")
         connection_id = data.get("connection_id")
+        agent_id = data.get("agent_id")
+
+        type_errors = []
+        if user_id is not None and not isinstance(user_id, str):
+            type_errors.append(f"user_id must be str, got {type(user_id).__name__}")
+        if connection_id is not None and not isinstance(connection_id, str):
+            type_errors.append(f"connection_id must be str, got {type(connection_id).__name__}")
+        if agent_id is not None and not isinstance(agent_id, str):
+            type_errors.append(f"agent_id must be str, got {type(agent_id).__name__}")
+        if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+            type_errors.append("scopes must be a list of str")
+
+        if type_errors:
+            logger.warning(
+                "AgentAdmit introspection response failed type validation: %s",
+                "; ".join(type_errors),
+            )
+            raise ValueError("Introspection response failed type validation")
 
         if not user_id:
             raise ValueError("Introspection returned no user")
 
+        # user_id is str (type-checked above) — safe to pass to storage.
         user = self.storage.get_user(user_id, self.config.user_lookup_field) or {"user_id": user_id}
         connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": data.get("agent_label", "Unknown Agent")}
 

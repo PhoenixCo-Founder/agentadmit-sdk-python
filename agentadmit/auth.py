@@ -280,17 +280,44 @@ def get_agentadmit_user(
     # expired/revoked tokens. Without this check, we'd read empty scopes.
     # The error code is one of VERIFY_ERROR_CODES (e.g. token_expired,
     # connection_expired, environment_mismatch); unknown codes pass through.
-    if not introspection_data.get("active"):
+    #
+    # IMPORTANT: active must be the boolean True — not just truthy. A crafted
+    # response {"active": 1} or {"active": "yes"} must not bypass this check.
+    if introspection_data.get("active") is not True:
         reason = introspection_data.get("error", "invalid_token")
         raise HTTPException(
             status_code=403 if reason == "insufficient_scope" else 401,
             detail={"error": reason, "error_description": f"Token is not active: {reason}"},
         )
 
-    # Extract validated data from introspection response
-    scopes = introspection_data.get("scopes", [])
+    # --- M5: Validate introspection response field types ---
+    # A malicious introspection response (e.g. {"active":true,"user_id":{"$ne":null}})
+    # can inject arbitrary values into downstream Mongo queries.
+    # Reject any response where the fields the SDK consumes are not the expected types.
     user_id = introspection_data.get("user_id")
     connection_id = introspection_data.get("connection_id")
+    agent_id = introspection_data.get("agent_id")
+    scopes = introspection_data.get("scopes", [])
+
+    type_errors = []
+    if user_id is not None and not isinstance(user_id, str):
+        type_errors.append(f"user_id must be str, got {type(user_id).__name__}")
+    if connection_id is not None and not isinstance(connection_id, str):
+        type_errors.append(f"connection_id must be str, got {type(connection_id).__name__}")
+    if agent_id is not None and not isinstance(agent_id, str):
+        type_errors.append(f"agent_id must be str, got {type(agent_id).__name__}")
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        type_errors.append("scopes must be a list of str")
+
+    if type_errors:
+        logger.warning(
+            "AgentAdmit introspection response failed type validation: %s",
+            "; ".join(type_errors),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": "Introspection response failed type validation"},
+        )
 
     if not user_id:
         raise HTTPException(
@@ -298,7 +325,13 @@ def get_agentadmit_user(
             detail={"error": "invalid_token", "error_description": "Introspection returned no user"},
         )
 
-    # User lookup from app's local database
+    # User lookup from app's local database.
+    # Guard: user_id is guaranteed str at this point (type-checked above).
+    if not isinstance(user_id, str):
+        raise HTTPException(  # pragma: no cover — belt-and-suspenders guard
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": "user_id must be a string"},
+        )
     user = storage.get_user(user_id, config.user_lookup_field) if storage else None
     connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": introspection_data.get("agent_label", "Unknown Agent")}
 

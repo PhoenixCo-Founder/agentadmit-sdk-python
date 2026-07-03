@@ -173,6 +173,14 @@ class MongoDBStorage(StorageBackend):
         if self._users is None:
             logger.warning("Users collection not set. Call storage.set_users_collection('your_users_collection')")
             return None
+        # Guard: reject non-string user_id to prevent NoSQL operator injection
+        # (e.g. {"$ne": null} bypassing the query and matching arbitrary docs).
+        if not isinstance(user_id, str):
+            logger.error(
+                "get_user called with non-string user_id (type=%s) — rejecting query",
+                type(user_id).__name__,
+            )
+            return None
         return self._users.find_one({lookup_field: user_id})
 
 
@@ -242,6 +250,13 @@ class MemoryStorage(StorageBackend):
                    and period_start <= e.get("timestamp", datetime.min) < period_end)
 
     def get_user(self, user_id: str, lookup_field: str = "user_id") -> Optional[dict]:
+        # Guard: reject non-string user_id (same contract as MongoDBStorage).
+        if not isinstance(user_id, str):
+            logger.error(
+                "get_user called with non-string user_id (type=%s) — rejecting",
+                type(user_id).__name__,
+            )
+            return None
         return self._users.get(user_id)
 
     def add_test_user(self, user_id: str, user_data: dict) -> None:
