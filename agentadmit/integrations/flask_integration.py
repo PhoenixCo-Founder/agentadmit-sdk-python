@@ -19,15 +19,17 @@ Usage:
 
 import functools
 import logging
+import secrets
 from datetime import datetime
 from typing import Callable, Optional
 
-import requests as _requests
+import httpx
 from flask import Blueprint, Flask, g, jsonify, request
 
+from agentadmit.auth import _introspect_with_retry
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.storage import create_storage, StorageBackend
-from agentadmit.exceptions import ConfigurationError
+from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -97,28 +99,31 @@ class AgentAdmitFlask:
         if not token.startswith(self.config.token_prefix_access):
             raise ValueError("Not an AgentAdmit access token")
 
-        # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service
-        import requests as _requests
-
+        # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service,
+        # using the shared retry client (429 backoff, capped Retry-After,
+        # 120s wait budget). RateLimitError propagates to the decorators,
+        # which surface 502 — a rate-limited introspection is a service
+        # condition, not an invalid token.
         try:
-            resp = _requests.post(
+            resp = _introspect_with_retry(
                 self.config.agentadmit_verify_url,
-                headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"token": token},
-                timeout=5,
+                token,
+                self.config.app_id,
+                self.config.api_key,
             )
-        except _requests.exceptions.RequestException as exc:
-            raise ValueError(f"Introspection failed: {exc}")
+        except RateLimitError:
+            raise
+        except Exception as exc:
+            # Network failure (the shared client raises FastAPI's
+            # HTTPException(502); any transport error lands here too).
+            raise IntrospectionUnavailableError("Could not reach AgentAdmit verification service") from exc
 
         if resp.status_code == 401:
             err_data = resp.json() if "application/json" in resp.headers.get("content-type", "") else {}
             raise ValueError(err_data.get("error_description", "Token validation failed"))
 
         if resp.status_code != 200:
-            raise ValueError(f"Verification service returned {resp.status_code}")
+            raise IntrospectionUnavailableError(f"Verification service returned {resp.status_code}")
 
         data = resp.json()
 
@@ -166,6 +171,13 @@ class AgentAdmitFlask:
 
                 try:
                     ctx = self._validate_agent_token(token)
+                except RateLimitError:
+                    return jsonify({
+                        "error": "rate_limited",
+                        "error_description": "Authorization service is rate limiting; retry later",
+                    }), 502
+                except IntrospectionUnavailableError as e:
+                    return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
                 except Exception as e:
                     return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
 
@@ -193,6 +205,13 @@ class AgentAdmitFlask:
 
                 try:
                     ctx = self._validate_agent_token(token)
+                except RateLimitError:
+                    return jsonify({
+                        "error": "rate_limited",
+                        "error_description": "Authorization service is rate limiting; retry later",
+                    }), 502
+                except IntrospectionUnavailableError as e:
+                    return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
                 except Exception as e:
                     return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
 
@@ -283,7 +302,7 @@ class AgentAdmitFlask:
                 payload["duration_seconds"] = data["duration_seconds"]
 
             try:
-                resp = _requests.post(
+                resp = httpx.post(
                     f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/apps/{aa.config.app_id}/token",
                     headers={
                         "Authorization": f"Bearer {aa.config.api_key}",
@@ -293,7 +312,7 @@ class AgentAdmitFlask:
                     json=payload,
                     timeout=10,
                 )
-            except _requests.exceptions.RequestException as exc:
+            except httpx.HTTPError as exc:
                 return jsonify({"error": "service_unavailable", "error_description": str(exc)}), 502
 
             if resp.status_code not in (200, 201):
@@ -301,6 +320,22 @@ class AgentAdmitFlask:
                 return jsonify({"error": "token_generation_failed", "error_description": "Authorization service could not generate token"}), 502
 
             token_data = resp.json()
+
+            # Store a local record so /connections and revoke have something
+            # to operate on (parity with the FastAPI router).
+            try:
+                aa.storage.store_connection({
+                    "connection_id": token_data.get("connection_id") or f"conn_{secrets.token_urlsafe(16)}",
+                    "user_id": str(user_id),
+                    "scopes": scopes,
+                    "role": role,
+                    "agent_label": data.get("label"),
+                    "duration_seconds": data.get("duration_seconds") if "duration_seconds" in data else None,
+                    "status": "active",
+                })
+            except Exception as exc:
+                logger.error("Local connection store failed: %s", exc)
+
             return jsonify({
                 "connection_token": token_data.get("token"),
                 "expires_in": token_data.get("expires_in") or aa.config.connection_token_ttl,
@@ -319,23 +354,26 @@ class AgentAdmitFlask:
             if not connection_token:
                 return jsonify({"error": "invalid_request", "error_description": "connection_token required"}), 400
 
+            # Optional fields must be OMITTED when absent: the hosted
+            # /api/v1/exchange rejects explicit JSON nulls ("Expected string,
+            # received null"). Parity with the FastAPI router's v1.1.0 fix.
+            exchange_payload = {"token": connection_token}
+            for field in ("agent_label", "agent_id", "agent_metadata"):
+                if data.get(field) is not None:
+                    exchange_payload[field] = data[field]
+
             try:
                 # No API key on /exchange — the connection token is the credential.
-                resp = _requests.post(
+                resp = httpx.post(
                     f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/exchange",
                     headers={
                         "Content-Type": "application/json",
                         "X-App-Id": aa.config.app_id,
                     },
-                    json={
-                        "token": connection_token,
-                        "agent_label": data.get("agent_label"),
-                        "agent_id": data.get("agent_id"),
-                        "agent_metadata": data.get("agent_metadata"),
-                    },
+                    json=exchange_payload,
                     timeout=10,
                 )
-            except _requests.exceptions.RequestException as exc:
+            except httpx.HTTPError as exc:
                 return jsonify({"error": "service_unavailable", "error_description": str(exc)}), 502
 
             if resp.status_code != 200:
@@ -371,9 +409,12 @@ class AgentAdmitFlask:
             conn = aa.storage.get_connection(connection_id)
             if not conn or conn.get("user_id") != user_id:
                 return jsonify({"error": "not_found"}), 404
-            # Call hosted service to revoke
+            # Revoke at the hosted service FIRST — that's where enforcement
+            # happens. If this fails, the agent's token still verifies, so
+            # claiming revoked=True would be false comfort. 404 means the
+            # hosted service has no such connection — nothing to revoke there.
             try:
-                _requests.post(
+                resp = httpx.post(
                     f"{aa.config.agentadmit_api_url.rstrip('/')}/api/v1/revoke",
                     headers={
                         "Authorization": f"Bearer {aa.config.api_key}",
@@ -383,8 +424,20 @@ class AgentAdmitFlask:
                     json={"connection_id": connection_id, "reason": "user_requested"},
                     timeout=10,
                 )
-            except Exception as exc:
-                logger.warning("Hosted revoke failed for %s: %s (revoking locally anyway)", connection_id, exc)
+            except httpx.HTTPError as exc:
+                logger.error("Hosted revoke failed for %s: %s", connection_id, exc)
+                return jsonify({
+                    "revoked": False,
+                    "error": "revoke_failed",
+                    "error_description": "Authorization service could not be reached. Try again.",
+                }), 502
+            if not (200 <= resp.status_code < 300 or resp.status_code == 404):
+                logger.error("Hosted revoke failed for %s: HTTP %s", connection_id, resp.status_code)
+                return jsonify({
+                    "revoked": False,
+                    "error": "revoke_failed",
+                    "error_description": "Authorization service could not revoke the connection. Try again.",
+                }), 502
             aa.storage.revoke_connection(connection_id)
             return jsonify({"revoked": True, "connection_id": connection_id})
 

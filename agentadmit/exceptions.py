@@ -83,3 +83,10 @@ class RateLimitError(AgentAdmitError):
         self.remaining = remaining
         self.reset = reset
         super().__init__(message)
+
+
+class IntrospectionUnavailableError(Exception):
+    """The AgentAdmit hosted service could not be reached or errored (5xx).
+
+    Distinct from an invalid token: callers must surface 502, never 401.
+    """
