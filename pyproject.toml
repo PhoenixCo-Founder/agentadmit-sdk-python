@@ -30,6 +30,10 @@ dev = [
     "pytest>=7.0,<9.0",
     "httpx>=0.24.0,<1.0.0",
     "uvicorn>=0.23.0,<1.0.0",
+    # Optional framework integrations exercised by the test suite (Flask and
+    # Django parity tests). Required for `pytest tests/` to collect cleanly.
+    "flask>=3.0,<4.0",
+    "django>=4.2,<6.0",
 ]
 
 [project.scripts]
