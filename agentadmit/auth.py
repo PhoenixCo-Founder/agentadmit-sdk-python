@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
+import httpx
 import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,6 +30,11 @@ from agentadmit.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on any single retry wait — including a server-supplied Retry-After.
+MAX_RETRY_WAIT_SECONDS = 30.0
+# Hard cap on cumulative wait across all retries of a single verify call.
+MAX_RETRY_BUDGET_SECONDS = 120.0
 
 # Bearer token extractor
 security = HTTPBearer(auto_error=False)
@@ -71,7 +77,7 @@ def _introspect_with_retry(
     api_key: str,
     timeout: int = 5,
     max_retries: int = 3,
-) -> "requests.Response":
+) -> "httpx.Response":
     """
     POST to the AgentAdmit introspection endpoint with automatic 429 retry.
 
@@ -79,13 +85,14 @@ def _introspect_with_retry(
       - Initial delay: 1 second
       - Each retry doubles the delay (exponential backoff), capped at 30 seconds
       - Each delay adds 0–500 ms of random jitter
-      - Honors Retry-After header if present (overrides computed delay)
-      - After max_retries exhausted on 429, raises RateLimitError
+      - Honors Retry-After header if present, capped at 30 seconds
+        (Retry-After is untrusted server input and must not pin the caller)
+      - Cumulative wait across retries is capped at 120 seconds
+      - After max_retries or the wait budget is exhausted on 429, raises
+        RateLimitError
 
     Returns the successful Response object (status 200 or non-429 error).
     """
-    import requests as _requests
-
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -93,11 +100,12 @@ def _introspect_with_retry(
     payload = {"token": token}
 
     delay = 1.0  # seconds — initial backoff
+    waited = 0.0  # cumulative wait across retries
 
     for attempt in range(max_retries + 1):
         try:
-            response = _requests.post(url, headers=headers, json=payload, timeout=timeout)
-        except _requests.exceptions.RequestException as exc:
+            response = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        except httpx.HTTPError as exc:
             logger.error("AgentAdmit introspection failed (network): %s", exc)
             raise HTTPException(
                 status_code=502,
@@ -130,10 +138,25 @@ def _introspect_with_retry(
                 reset=rl_reset,
             )
 
-        # Compute wait time: Retry-After beats exponential backoff
-        wait = retry_after_hdr if retry_after_hdr is not None else min(delay, 30.0)
+        # Compute wait time: Retry-After beats exponential backoff, but both
+        # are capped — Retry-After is untrusted server input.
+        requested = retry_after_hdr if retry_after_hdr is not None else delay
+        wait = min(max(0.0, requested), MAX_RETRY_WAIT_SECONDS)
         jitter = random.uniform(0, 0.5)  # 0–500 ms
         wait_total = wait + jitter
+
+        if waited + wait_total > MAX_RETRY_BUDGET_SECONDS:
+            raise RateLimitError(
+                message=(
+                    f"AgentAdmit rate limit retry budget "
+                    f"({MAX_RETRY_BUDGET_SECONDS:.0f}s) exhausted."
+                ),
+                retry_after=retry_after_hdr,
+                limit=rl_limit,
+                remaining=rl_remaining,
+                reset=rl_reset,
+            )
+        waited += wait_total
 
         logger.warning(
             "AgentAdmit introspection rate-limited (attempt %d/%d). "
@@ -152,7 +175,7 @@ def _introspect_with_retry(
     raise RuntimeError("Unexpected exit from retry loop")  # pragma: no cover
 
 
-def _parse_int_header(response: "requests.Response", name: str) -> Optional[int]:
+def _parse_int_header(response: "httpx.Response", name: str) -> Optional[int]:
     """Parse an integer HTTP response header, returning None if missing or invalid."""
     val = response.headers.get(name)
     if val is None:
@@ -163,7 +186,7 @@ def _parse_int_header(response: "requests.Response", name: str) -> Optional[int]
         return None
 
 
-def _parse_float_header(response: "requests.Response", name: str) -> Optional[float]:
+def _parse_float_header(response: "httpx.Response", name: str) -> Optional[float]:
     """Parse a float HTTP response header, returning None if missing or invalid."""
     val = response.headers.get(name)
     if val is None:
@@ -257,17 +280,44 @@ def get_agentadmit_user(
     # expired/revoked tokens. Without this check, we'd read empty scopes.
     # The error code is one of VERIFY_ERROR_CODES (e.g. token_expired,
     # connection_expired, environment_mismatch); unknown codes pass through.
-    if not introspection_data.get("active"):
+    #
+    # IMPORTANT: active must be the boolean True — not just truthy. A crafted
+    # response {"active": 1} or {"active": "yes"} must not bypass this check.
+    if introspection_data.get("active") is not True:
         reason = introspection_data.get("error", "invalid_token")
         raise HTTPException(
             status_code=403 if reason == "insufficient_scope" else 401,
             detail={"error": reason, "error_description": f"Token is not active: {reason}"},
         )
 
-    # Extract validated data from introspection response
-    scopes = introspection_data.get("scopes", [])
+    # --- M5: Validate introspection response field types ---
+    # A malicious introspection response (e.g. {"active":true,"user_id":{"$ne":null}})
+    # can inject arbitrary values into downstream Mongo queries.
+    # Reject any response where the fields the SDK consumes are not the expected types.
     user_id = introspection_data.get("user_id")
     connection_id = introspection_data.get("connection_id")
+    agent_id = introspection_data.get("agent_id")
+    scopes = introspection_data.get("scopes", [])
+
+    type_errors = []
+    if user_id is not None and not isinstance(user_id, str):
+        type_errors.append(f"user_id must be str, got {type(user_id).__name__}")
+    if connection_id is not None and not isinstance(connection_id, str):
+        type_errors.append(f"connection_id must be str, got {type(connection_id).__name__}")
+    if agent_id is not None and not isinstance(agent_id, str):
+        type_errors.append(f"agent_id must be str, got {type(agent_id).__name__}")
+    if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+        type_errors.append("scopes must be a list of str")
+
+    if type_errors:
+        logger.warning(
+            "AgentAdmit introspection response failed type validation: %s",
+            "; ".join(type_errors),
+        )
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": "Introspection response failed type validation"},
+        )
 
     if not user_id:
         raise HTTPException(
@@ -275,7 +325,13 @@ def get_agentadmit_user(
             detail={"error": "invalid_token", "error_description": "Introspection returned no user"},
         )
 
-    # User lookup from app's local database
+    # User lookup from app's local database.
+    # Guard: user_id is guaranteed str at this point (type-checked above).
+    if not isinstance(user_id, str):
+        raise HTTPException(  # pragma: no cover — belt-and-suspenders guard
+            status_code=401,
+            detail={"error": "invalid_token", "error_description": "user_id must be a string"},
+        )
     user = storage.get_user(user_id, config.user_lookup_field) if storage else None
     connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": introspection_data.get("agent_label", "Unknown Agent")}
 

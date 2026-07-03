@@ -315,11 +315,23 @@ def create_agentadmit_router(
             agent_ctx = get_agentadmit_user(credentials)
             conn_id = agent_ctx["connection"]["connection_id"]
 
-            # Call hosted service to revoke
+            # Revoke at the hosted service FIRST — that's where enforcement
+            # happens. If this fails, the token still verifies, so claiming
+            # revoked=True would be false comfort. 404 means the hosted
+            # service has no such connection — nothing to revoke there.
             resp = _call_hosted_service("POST", "/api/v1/revoke", json={
                 "connection_id": conn_id,
                 "reason": reason,
             })
+            if not (200 <= resp.status_code < 300 or resp.status_code == 404):
+                logger.error("Hosted revoke failed for %s: HTTP %s", conn_id, resp.status_code)
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "revoke_failed",
+                        "error_description": "Authorization service could not revoke the connection. Try again.",
+                    },
+                )
 
             # Also revoke locally
             try:
@@ -352,16 +364,24 @@ def create_agentadmit_router(
         if conn.get("status") != "active":
             raise HTTPException(status_code=400, detail={"error": "already_revoked", "error_description": "Connection is already revoked or expired"})
 
-        # Call hosted service to revoke
-        try:
-            _call_hosted_service("POST", "/api/v1/revoke", json={
-                "connection_id": connection_id,
-                "reason": reason,
-            })
-        except Exception as exc:
-            logger.warning("Hosted revoke failed for %s: %s (revoking locally anyway)", connection_id, exc)
+        # Revoke at the hosted service FIRST — that's where enforcement
+        # happens. If this fails, the agent's token still verifies, so
+        # claiming revoked=True would be false comfort. 404 means the hosted
+        # service has no such connection — nothing to revoke there.
+        resp = _call_hosted_service("POST", "/api/v1/revoke", json={
+            "connection_id": connection_id,
+            "reason": reason,
+        })
+        if not (200 <= resp.status_code < 300 or resp.status_code == 404):
+            logger.error("Hosted revoke failed for %s: HTTP %s", connection_id, resp.status_code)
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "error": "revoke_failed",
+                    "error_description": "Authorization service could not revoke the connection. Try again.",
+                },
+            )
 
-        # Always revoke locally
         storage.revoke_connection(connection_id)
         logger.info("Connection revoked by user via hosted service: %s reason=%s", connection_id, reason)
         return RevokeResponse(revoked=True, connection_id=connection_id)
