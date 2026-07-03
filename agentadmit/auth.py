@@ -13,6 +13,7 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
+import httpx
 import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,6 +30,11 @@ from agentadmit.exceptions import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Hard cap on any single retry wait — including a server-supplied Retry-After.
+MAX_RETRY_WAIT_SECONDS = 30.0
+# Hard cap on cumulative wait across all retries of a single verify call.
+MAX_RETRY_BUDGET_SECONDS = 120.0
 
 # Bearer token extractor
 security = HTTPBearer(auto_error=False)
@@ -71,7 +77,7 @@ def _introspect_with_retry(
     api_key: str,
     timeout: int = 5,
     max_retries: int = 3,
-) -> "requests.Response":
+) -> "httpx.Response":
     """
     POST to the AgentAdmit introspection endpoint with automatic 429 retry.
 
@@ -79,13 +85,14 @@ def _introspect_with_retry(
       - Initial delay: 1 second
       - Each retry doubles the delay (exponential backoff), capped at 30 seconds
       - Each delay adds 0–500 ms of random jitter
-      - Honors Retry-After header if present (overrides computed delay)
-      - After max_retries exhausted on 429, raises RateLimitError
+      - Honors Retry-After header if present, capped at 30 seconds
+        (Retry-After is untrusted server input and must not pin the caller)
+      - Cumulative wait across retries is capped at 120 seconds
+      - After max_retries or the wait budget is exhausted on 429, raises
+        RateLimitError
 
     Returns the successful Response object (status 200 or non-429 error).
     """
-    import requests as _requests
-
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -93,11 +100,12 @@ def _introspect_with_retry(
     payload = {"token": token}
 
     delay = 1.0  # seconds — initial backoff
+    waited = 0.0  # cumulative wait across retries
 
     for attempt in range(max_retries + 1):
         try:
-            response = _requests.post(url, headers=headers, json=payload, timeout=timeout)
-        except _requests.exceptions.RequestException as exc:
+            response = httpx.post(url, headers=headers, json=payload, timeout=timeout)
+        except httpx.HTTPError as exc:
             logger.error("AgentAdmit introspection failed (network): %s", exc)
             raise HTTPException(
                 status_code=502,
@@ -130,10 +138,25 @@ def _introspect_with_retry(
                 reset=rl_reset,
             )
 
-        # Compute wait time: Retry-After beats exponential backoff
-        wait = retry_after_hdr if retry_after_hdr is not None else min(delay, 30.0)
+        # Compute wait time: Retry-After beats exponential backoff, but both
+        # are capped — Retry-After is untrusted server input.
+        requested = retry_after_hdr if retry_after_hdr is not None else delay
+        wait = min(max(0.0, requested), MAX_RETRY_WAIT_SECONDS)
         jitter = random.uniform(0, 0.5)  # 0–500 ms
         wait_total = wait + jitter
+
+        if waited + wait_total > MAX_RETRY_BUDGET_SECONDS:
+            raise RateLimitError(
+                message=(
+                    f"AgentAdmit rate limit retry budget "
+                    f"({MAX_RETRY_BUDGET_SECONDS:.0f}s) exhausted."
+                ),
+                retry_after=retry_after_hdr,
+                limit=rl_limit,
+                remaining=rl_remaining,
+                reset=rl_reset,
+            )
+        waited += wait_total
 
         logger.warning(
             "AgentAdmit introspection rate-limited (attempt %d/%d). "
@@ -152,7 +175,7 @@ def _introspect_with_retry(
     raise RuntimeError("Unexpected exit from retry loop")  # pragma: no cover
 
 
-def _parse_int_header(response: "requests.Response", name: str) -> Optional[int]:
+def _parse_int_header(response: "httpx.Response", name: str) -> Optional[int]:
     """Parse an integer HTTP response header, returning None if missing or invalid."""
     val = response.headers.get(name)
     if val is None:
@@ -163,7 +186,7 @@ def _parse_int_header(response: "requests.Response", name: str) -> Optional[int]
         return None
 
 
-def _parse_float_header(response: "requests.Response", name: str) -> Optional[float]:
+def _parse_float_header(response: "httpx.Response", name: str) -> Optional[float]:
     """Parse a float HTTP response header, returning None if missing or invalid."""
     val = response.headers.get(name)
     if val is None:
