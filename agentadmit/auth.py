@@ -335,7 +335,14 @@ def get_agentadmit_user(
     user = storage.get_user(user_id, config.user_lookup_field) if storage else None
     connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": introspection_data.get("agent_label", "Unknown Agent")}
 
-    return {"user": user or {"user_id": user_id}, "connection": connection, "scopes": scopes}
+    context = {"user": user or {"user_id": user_id}, "connection": connection, "scopes": scopes}
+
+    # Consent Ledger verdict rides along when the platform returns it (additive).
+    consent = introspection_data.get("consent")
+    if isinstance(consent, dict) and isinstance(consent.get("granted"), bool):
+        context["consent"] = consent
+
+    return context
 
 
 # ---------------------------------------------------------------------------

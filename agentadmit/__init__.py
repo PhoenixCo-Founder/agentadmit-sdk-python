@@ -37,6 +37,7 @@ from agentadmit.alerts import (
     get_alert_config,
     ALERT_TYPES,
 )
+from agentadmit.consent import check_consent, CALLER_CLASSES
 from agentadmit.models import VERIFY_ERROR_CODES
 from agentadmit.webhooks import (
     verify_webhook_signature,
@@ -63,6 +64,10 @@ __all__ = [
     "log_agent_access",
     "check_connection_cap",
     "create_agentadmit_router",
+
+    # Consent Ledger
+    "check_consent",
+    "CALLER_CLASSES",
 
     # Alerts API
     "configure_alerts",

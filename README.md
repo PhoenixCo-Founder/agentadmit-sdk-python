@@ -158,6 +158,30 @@ Full MCP integration guide with complete before/after examples: `agentadmit.com/
 
 **In-app AI scopes.** If your app has built-in AI features (analysis, plan generation, photo recognition), do not expose those as agent scopes. The user's AI agent can read the raw data and do the analysis itself. Exposing in-app AI endpoints to agents creates double cost.
 
+## Consent Ledger (Caller-Identity Consent)
+
+AgentAdmit can host per-user consent switches for three independent caller classes: `human_session`, `in_app_ai`, and `external_agent`. No class's setting implies another's.
+
+**External agents:** the verify response already carries the verdict; it appears on the agent context as `auth_ctx["consent"]` when present:
+
+```python
+consent = auth_ctx.get("consent")
+if consent and not consent["granted"]:
+    raise HTTPException(403, "The data owner has not enabled external agent access.")
+```
+
+**Human sessions and in-app AI** never hold AgentAdmit tokens, so ask directly:
+
+```python
+from agentadmit import check_consent
+
+verdict = check_consent(app_user_id="user_8842", caller_class="in_app_ai")
+if not verdict["granted"]:
+    ...  # do not run AI over this user's data
+```
+
+Consent is orthogonal to revocation: a denied verdict means your app returns its own 403; the connection and token stay valid so the user can flip consent back on without re-connecting. Write switches through `PUT /api/v1/consent/settings` from your backend; export the audit trail with `GET /api/v1/consent/export` (every plan).
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

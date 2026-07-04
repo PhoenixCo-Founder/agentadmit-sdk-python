@@ -1,0 +1,2 @@
+[console_scripts]
+agentadmit = agentadmit.cli:main
