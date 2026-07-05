@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import httpx
 from flask import Blueprint, Flask, g, jsonify, request
 
-from agentadmit.auth import _introspect_with_retry
+from agentadmit.auth import _introspect_with_retry, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.storage import create_storage, StorageBackend
 from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError
@@ -162,7 +162,16 @@ class AgentAdmitFlask:
         user = self.storage.get_user(user_id, self.config.user_lookup_field) or {"user_id": user_id}
         connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": data.get("agent_label", "Unknown Agent")}
 
-        return {"user": user, "connection": connection, "scopes": scopes}
+        context = {"user": user, "connection": connection, "scopes": scopes}
+
+        # Human-presence fact (WebAuthn step-up) rides along when the platform
+        # returns it (additive). Same strictness as `active`: verified must be
+        # a real bool, never coerced.
+        presence = data.get("presence")
+        if isinstance(presence, dict) and isinstance(presence.get("verified"), bool):
+            context["presence"] = presence
+
+        return context
 
     def get_current_user_or_agent(self) -> dict:
         """Get the current user or agent from the request."""
@@ -209,6 +218,44 @@ class AgentAdmitFlask:
                     }), 403
 
                 self._log_access(ctx, scope)
+                g.agent_ctx = ctx
+                return f(*args, **kwargs)
+            return wrapped
+        return decorator
+
+    def require_presence(self):
+        """Decorator: require a presence-verified connection (agent-only endpoints).
+
+        Fail closed: 403 presence_required when the connection was minted
+        without a completed WebAuthn ceremony, including all connections
+        from servers that predate the presence feature. Missing/non-agent
+        tokens get 401, exactly as require_scope behaves.
+        """
+        def decorator(f):
+            @functools.wraps(f)
+            def wrapped(*args, **kwargs):
+                token = self._get_bearer_token()
+                if not token or not token.startswith(self.config.token_prefix_access):
+                    return jsonify({"error": "invalid_token", "error_description": "AgentAdmit token required"}), 401
+
+                try:
+                    ctx = self._validate_agent_token(token)
+                except RateLimitError:
+                    return jsonify({
+                        "error": "rate_limited",
+                        "error_description": "Authorization service is rate limiting; retry later",
+                    }), 502
+                except IntrospectionUnavailableError as e:
+                    return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
+                except Exception as e:
+                    return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
+
+                if not presence_verified(ctx):
+                    return jsonify({
+                        "error": "presence_required",
+                        "error_description": "This action requires a connection authorized with human presence verification.",
+                    }), 403
+
                 g.agent_ctx = ctx
                 return f(*args, **kwargs)
             return wrapped

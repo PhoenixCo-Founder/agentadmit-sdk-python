@@ -182,6 +182,29 @@ if not verdict["granted"]:
 
 Consent is orthogonal to revocation: a denied verdict means your app returns its own 403; the connection and token stay valid so the user can flip consent back on without re-connecting. Write switches through `PUT /api/v1/consent/settings` from your backend; export the audit trail with `GET /api/v1/consent/export` (every plan).
 
+## Presence Verification (WebAuthn Step-Up)
+
+The verify response can carry a human-presence fact for the connection: whether the person who authorized it completed a WebAuthn ceremony on the consent page. It appears on the agent context as `auth_ctx["presence"]` when the platform returns it. Older servers omit it, and `verified` is `false` for connections minted without a ceremony (direct-API tokens, presence-off sessions, pre-presence connections).
+
+```python
+from agentadmit import presence_verified
+
+if not presence_verified(auth_ctx):
+    ...  # not presence-verified; absent or malformed data never counts as verified
+```
+
+Guard sensitive endpoints with the fail-closed dependency; a connection without a completed ceremony gets a 403 `presence_required`:
+
+```python
+from agentadmit import require_presence
+
+@app.post("/api/transfers")
+async def create_transfer(agent_ctx=Depends(require_presence())):
+    ...
+```
+
+Flask and Django ship the same guard: `@aa.require_presence()` on the Flask integration, and `require_presence()` from `agentadmit.integrations.django_integration`.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

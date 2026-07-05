@@ -43,7 +43,7 @@ from django.http import JsonResponse
 from django.urls import path
 from django.conf import settings
 
-from agentadmit.auth import _introspect_with_retry
+from agentadmit.auth import _introspect_with_retry, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
 from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError
 from agentadmit.storage import create_storage
@@ -176,7 +176,16 @@ def _validate_agent_token(token: str) -> dict:
     user = _storage.get_user(user_id, _config.user_lookup_field) or {"user_id": user_id}
     connection = {"connection_id": connection_id, "scopes": scopes, "agent_label": data.get("agent_label", "Unknown Agent")}
 
-    return {"user": user, "connection": connection, "scopes": scopes}
+    context = {"user": user, "connection": connection, "scopes": scopes}
+
+    # Human-presence fact (WebAuthn step-up) rides along when the platform
+    # returns it (additive). Same strictness as `active`: verified must be a
+    # real bool, never coerced.
+    presence = data.get("presence")
+    if isinstance(presence, dict) and isinstance(presence.get("verified"), bool):
+        context["presence"] = presence
+
+    return context
 
 
 def _log_access(ctx, scope, request):
@@ -262,6 +271,46 @@ def require_scope(scope: str):
                 return JsonResponse({"error": "insufficient_scope", "required_scope": scope}, status=403)
 
             _log_access(ctx, scope, request)
+            request.agentadmit_user = {"auth_type": "agent", **ctx}
+            return view_func(request, *args, **kwargs)
+        return wrapped
+    return decorator
+
+
+def require_presence():
+    """Decorator: require a presence-verified connection (agent-only).
+
+    Fail closed: 403 presence_required when the connection was minted
+    without a completed WebAuthn ceremony, including all connections from
+    servers that predate the presence feature. Missing/non-agent tokens
+    get 401, exactly as require_scope behaves.
+    """
+    def decorator(view_func):
+        @functools.wraps(view_func)
+        def wrapped(request, *args, **kwargs):
+            _init()
+            token = _get_bearer_token(request)
+            if not token or not token.startswith(_config.token_prefix_access):
+                return JsonResponse({"error": "invalid_token"}, status=401)
+
+            try:
+                ctx = _validate_agent_token(token)
+            except RateLimitError:
+                return JsonResponse({
+                    "error": "rate_limited",
+                    "error_description": "Authorization service is rate limiting; retry later",
+                }, status=502)
+            except IntrospectionUnavailableError as e:
+                return JsonResponse({"error": "service_unavailable", "error_description": str(e)}, status=502)
+            except Exception as e:
+                return JsonResponse({"error": "invalid_token", "error_description": str(e)}, status=401)
+
+            if not presence_verified(ctx):
+                return JsonResponse({
+                    "error": "presence_required",
+                    "error_description": "This action requires a connection authorized with human presence verification.",
+                }, status=403)
+
             request.agentadmit_user = {"auth_type": "agent", **ctx}
             return view_func(request, *args, **kwargs)
         return wrapped

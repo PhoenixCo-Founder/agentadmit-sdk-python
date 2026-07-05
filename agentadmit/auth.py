@@ -342,7 +342,34 @@ def get_agentadmit_user(
     if isinstance(consent, dict) and isinstance(consent.get("granted"), bool):
         context["consent"] = consent
 
+    # Human-presence fact (WebAuthn step-up) rides along when the platform
+    # returns it (additive). Same strictness as `active`: verified must be a
+    # real bool, never coerced. Absent on older servers; verified=False for
+    # connections minted without a completed ceremony (direct-API tokens,
+    # presence-off sessions, pre-presence connections).
+    presence = introspection_data.get("presence")
+    if isinstance(presence, dict) and isinstance(presence.get("verified"), bool):
+        context["presence"] = presence
+
     return context
+
+
+# ---------------------------------------------------------------------------
+# presence_verified: strict human-presence check on an agent context
+# ---------------------------------------------------------------------------
+
+def presence_verified(agent_ctx: Optional[dict]) -> bool:
+    """
+    True only when the connection behind this context was authorized by a
+    human who completed a presence ceremony (WebAuthn) on the consent page.
+
+    Strict: absent or malformed presence data is NOT verified. Only a
+    presence block whose ``verified`` field is the boolean True counts.
+    """
+    if not isinstance(agent_ctx, dict):
+        return False
+    presence = agent_ctx.get("presence")
+    return isinstance(presence, dict) and presence.get("verified") is True
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +407,42 @@ def require_scope(scope: str):
         return agent_ctx
 
     return scope_checker
+
+
+# ---------------------------------------------------------------------------
+# require_presence: fail-closed human-presence enforcement (agent-only)
+# ---------------------------------------------------------------------------
+
+def require_presence():
+    """
+    FastAPI dependency factory. Requires a presence-verified connection.
+
+    Fail closed: 403 ``presence_required`` when the connection was minted
+    without a completed WebAuthn ceremony, including all connections from
+    servers that predate the presence feature (mirrors require_scope's
+    posture). Missing or non-agent tokens are rejected by the underlying
+    token validation, exactly as require_scope behaves.
+
+    Usage:
+        @app.post("/api/transfers")
+        async def create_transfer(agent_ctx=Depends(require_presence())):
+            ...
+    """
+    def presence_checker(
+        agent_ctx: dict = Depends(get_agentadmit_user),
+    ) -> dict:
+        if not presence_verified(agent_ctx):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "presence_required",
+                    "error_description": "This action requires a connection authorized with human presence verification.",
+                },
+            )
+
+        return agent_ctx
+
+    return presence_checker
 
 
 # ---------------------------------------------------------------------------

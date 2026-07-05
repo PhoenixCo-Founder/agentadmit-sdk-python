@@ -26,6 +26,8 @@ from agentadmit.auth import (
     get_current_user_or_agent,
     require_scope,
     require_scope_if_agent,
+    require_presence,
+    presence_verified,
     log_agent_access,
     check_connection_cap,
 )
@@ -68,6 +70,10 @@ __all__ = [
     # Consent Ledger
     "check_consent",
     "CALLER_CLASSES",
+
+    # Presence verification (WebAuthn step-up)
+    "require_presence",
+    "presence_verified",
 
     # Alerts API
     "configure_alerts",
