@@ -4,3 +4,10 @@ build/
 __pycache__/
 *.pyc
 *.pyo
+
+# Virtual environments — never commit (a test venv was accidentally committed in v1.3.0)
+.venv/
+.venv-test/
+venv/
+env/
+ENV/
