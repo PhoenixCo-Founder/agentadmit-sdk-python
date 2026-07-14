@@ -182,6 +182,26 @@ if not verdict["granted"]:
 
 Consent is orthogonal to revocation: a denied verdict means your app returns its own 403; the connection and token stay valid so the user can flip consent back on without re-connecting. Write switches through `PUT /api/v1/consent/settings` from your backend; export the audit trail with `GET /api/v1/consent/export` (every plan).
 
+**One-dependency drop-in.** Instead of wiring the three paths by hand, `caller_consent()` classifies the caller from the credential and evaluates the right independent path:
+
+```python
+from fastapi import Depends
+from agentadmit import caller_consent
+
+@app.get("/api/records/{owner_id}")
+async def get_record(
+    ctx=Depends(caller_consent(
+        # derive the class from your own credential structure, never caller input
+        classify_non_agent=lambda r: "in_app_ai" if r.headers.get("x-internal-ai") == INTERNAL_SECRET else "human_session",
+        resolve_data_owner_id=lambda r: r.path_params["owner_id"],
+        required_scope="read:records",
+    )),
+):
+    ...  # ctx["caller_class"] is external_agent | in_app_ai | human_session
+```
+
+External agents are checked via hosted introspection (consent verdict plus scope); in-app AI via the Consent Ledger (fail closed); the human path defers to your own permission model unless you pass `gate_human=True`. It is a consent gate, not an authenticator, so run it after your own authentication.
+
 ## Presence Verification (WebAuthn Step-Up)
 
 The verify response can carry a human-presence fact for the connection: whether the person who authorized it completed a WebAuthn ceremony on the consent page. It appears on the agent context as `auth_ctx["presence"]` when the platform returns it. Older servers omit it, and `verified` is `false` for connections minted without a ceremony (direct-API tokens, presence-off sessions, pre-presence connections).
