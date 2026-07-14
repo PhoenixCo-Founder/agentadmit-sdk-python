@@ -40,6 +40,7 @@ from agentadmit.alerts import (
     ALERT_TYPES,
 )
 from agentadmit.consent import check_consent, CALLER_CLASSES
+from agentadmit.callerconsent import caller_consent, classify_caller
 from agentadmit.models import VERIFY_ERROR_CODES
 from agentadmit.webhooks import (
     verify_webhook_signature,
@@ -70,6 +71,10 @@ __all__ = [
     # Consent Ledger
     "check_consent",
     "CALLER_CLASSES",
+
+    # Caller-Identity Consent middleware
+    "caller_consent",
+    "classify_caller",
 
     # Presence verification (WebAuthn step-up)
     "require_presence",
