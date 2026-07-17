@@ -1,0 +1,44 @@
+# CI: tests + clean-install smoke on every push/PR to main.
+#
+# The clean-install smoke exists because of a shipped crash: through 1.5.0
+# httpx was declared only under the dev extra, so every dev environment had it
+# while a bare `pip install agentadmit` crashed on import. Installing the built
+# wheel into an EMPTY venv and importing is the only check that catches that
+# class of bug. Action versions pinned to exact SHAs per supply chain policy.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.10'  # the declared floor — tests must pass there
+
+      - name: Run tests
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pytest tests/
+
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Clean-install smoke test (runtime deps only)
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/*.whl
+          /tmp/smoke/bin/python -c "import agentadmit, agentadmit.callerconsent, agentadmit.consent, agentadmit.auth; print('clean import OK')"

@@ -14,7 +14,10 @@ One endpoint serves every caller class. On each request the dependency:
 
   external_agent : an ``ag_at_`` access token -> hosted introspection, which
                    returns the external-agent consent verdict inline plus the
-                   granted scopes. Enforced here directly.
+                   granted scopes. Consent is evaluated BEFORE scope (a denied
+                   class must not learn scope state or step-up guidance). A
+                   missing or malformed verdict is resolved through the Consent
+                   Ledger, fail-closed — absence is never a grant.
   in_app_ai      : your application's own server-side AI code path -> the
                    Consent Ledger ``/consent/check`` for the in-app-AI class.
   human_session  : your application's own permission model (sharing, roles,
@@ -110,6 +113,41 @@ def caller_consent(
         # ── external_agent: hosted introspection carries the verdict + scopes ──
         if caller_class == "external_agent":
             agent_ctx = get_agentadmit_user(credentials)
+
+            # Consent first (Patent FIG. 3: the class consent decision precedes
+            # scope evaluation). Checking scope first leaked granted-scope state
+            # and step-up guidance to callers whose class the owner had denied.
+            # The hosted service omits the verdict when its consent read fails
+            # (designed degraded mode), so an absent or malformed verdict is
+            # resolved through the Consent Ledger — never treated as a grant.
+            consent = agent_ctx.get("consent")
+            if not (isinstance(consent, dict) and isinstance(consent.get("granted"), bool)):
+                owner = (agent_ctx.get("user") or {}).get("user_id")
+                if not owner or not isinstance(owner, str):
+                    raise HTTPException(
+                        status_code=503,
+                        detail={
+                            "error": "consent_unavailable",
+                            "error_description": "introspection carried no consent verdict and no resolvable data owner",
+                        },
+                    )
+                try:
+                    consent = check_consent(owner, "external_agent", scope_group)
+                except Exception as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"error": "consent_unavailable", "error_description": str(exc)},
+                    )
+            if consent.get("granted") is not True:
+                raise HTTPException(
+                    status_code=403,
+                    detail={
+                        "error": "consent_not_granted",
+                        "caller_class": "external_agent",
+                        "source": consent.get("source"),
+                    },
+                )
+
             if required_scope and required_scope not in agent_ctx.get("scopes", []):
                 raise HTTPException(
                     status_code=403,
@@ -119,17 +157,7 @@ def caller_consent(
                         "granted_scopes": agent_ctx.get("scopes", []),
                     },
                 )
-            consent = agent_ctx.get("consent")
-            if isinstance(consent, dict) and consent.get("granted") is False:
-                raise HTTPException(
-                    status_code=403,
-                    detail={
-                        "error": "consent_not_granted",
-                        "caller_class": "external_agent",
-                        "source": consent.get("source"),
-                    },
-                )
-            return {"auth_type": "agent", "caller_class": "external_agent", **agent_ctx}
+            return {"auth_type": "agent", "caller_class": "external_agent", **agent_ctx, "consent": consent}
 
         # ── in_app_ai: your own AI code path, gated on the ledger ─────────────
         if caller_class == "in_app_ai":

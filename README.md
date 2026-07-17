@@ -7,6 +7,8 @@ User-mediated AI agent authorization for Python apps. Supports **FastAPI**, **Fl
 
 ## Quick Start
 
+**Requires Python 3.10+** (the install fails on 3.9 and older with a confusing resolver error — check `python3 --version` first).
+
 ```bash
 pip install agentadmit
 agentadmit init
@@ -162,11 +164,13 @@ Full MCP integration guide with complete before/after examples: `agentadmit.com/
 
 AgentAdmit can host per-user consent switches for three independent caller classes: `human_session`, `in_app_ai`, and `external_agent`. No class's setting implies another's.
 
-**External agents:** the verify response already carries the verdict; it appears on the agent context as `auth_ctx["consent"]` when present:
+**External agents:** the verify response already carries the verdict; it appears on the agent context as `auth_ctx["consent"]` when present. The hosted service deliberately omits the verdict when its consent store is unreadable (degraded mode), so treat an absent verdict as *unresolved*, never as a grant — resolve it with `check_consent`:
 
 ```python
 consent = auth_ctx.get("consent")
-if consent and not consent["granted"]:
+if not (isinstance(consent, dict) and isinstance(consent.get("granted"), bool)):
+    consent = check_consent(auth_ctx["user"]["user_id"], "external_agent")  # fail closed on error
+if consent["granted"] is not True:
     raise HTTPException(403, "The data owner has not enabled external agent access.")
 ```
 
@@ -200,7 +204,7 @@ async def get_record(
     ...  # ctx["caller_class"] is external_agent | in_app_ai | human_session
 ```
 
-External agents are checked via hosted introspection (consent verdict plus scope); in-app AI via the Consent Ledger (fail closed); the human path defers to your own permission model unless you pass `gate_human=True`. It is a consent gate, not an authenticator, so run it after your own authentication.
+External agents are checked via hosted introspection — the consent verdict is evaluated **before** the scope check (a caller whose class the owner denied learns nothing about scope state or step-up), and an absent verdict is resolved through the Consent Ledger, fail-closed. In-app AI goes through the Consent Ledger (fail closed); the human path defers to your own permission model unless you pass `gate_human=True`. It is a consent gate, not an authenticator, so run it after your own authentication.
 
 ## Presence Verification (WebAuthn Step-Up)
 
