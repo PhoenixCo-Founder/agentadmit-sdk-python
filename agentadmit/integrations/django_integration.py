@@ -61,12 +61,14 @@ _determine_role = lambda u: "user"
 _get_user_tier = None
 _validate_scopes = None
 _get_endpoints_for_scopes = lambda s: []
+_require_token_mint_presence = None
 
 
 def _init():
     """Initialize AgentAdmit from Django settings."""
     global _storage, _config, _get_current_user, _verify_user_token
     global _determine_role, _get_user_tier, _validate_scopes, _get_endpoints_for_scopes
+    global _require_token_mint_presence
 
     if _config is not None:
         return  # Already initialized
@@ -86,6 +88,7 @@ def _init():
     _determine_role = aa_settings.get('determine_role', lambda u: "user")
     _get_user_tier = aa_settings.get('get_user_tier', lambda u: _config.default_tier)
     _get_endpoints_for_scopes = aa_settings.get('get_endpoints_for_scopes', lambda s: [])
+    _require_token_mint_presence = aa_settings.get('require_token_mint_presence')
 
     if aa_settings.get('validate_scopes'):
         _validate_scopes = aa_settings['validate_scopes']
@@ -404,6 +407,20 @@ def generate_token_view(request):
 
     user_id = current_user.get(_config.user_lookup_field)
     role = _determine_role(current_user)
+
+    if _require_token_mint_presence is not None:
+        # Presence gate: the hook RAISES to deny. A non-None return is a
+        # contract violation -> fail closed (500), never a passthrough.
+        presence_result = _require_token_mint_presence(
+            request=request,
+            current_user=current_user,
+            body=data,
+        )
+        if presence_result is not None:
+            return JsonResponse({
+                "error": "presence_hook_misconfigured",
+                "error_description": "The token-mint presence hook must raise to deny; it must not return a value.",
+            }, status=500)
 
     # duration_seconds is tri-state: key absent → hosted default (30 days);
     # explicit null → until revoked; integer → explicit duration.

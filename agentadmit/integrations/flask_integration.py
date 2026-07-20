@@ -54,6 +54,7 @@ class AgentAdmitFlask:
         get_user_tier: Callable = None,
         validate_scopes: Callable = None,
         get_endpoints_for_scopes: Callable = None,
+        require_token_mint_presence: Callable = None,
         users_collection: str = "users",
         auto_generate_keys: bool = True,
     ):
@@ -64,6 +65,7 @@ class AgentAdmitFlask:
         self._determine_role = determine_role or (lambda u: "user")
         self._get_user_tier = get_user_tier or (lambda u: self.config.default_tier)
         self._get_endpoints_for_scopes = get_endpoints_for_scopes or (lambda s: [])
+        self._require_token_mint_presence = require_token_mint_presence
 
         if validate_scopes:
             self._validate_scopes = validate_scopes
@@ -357,6 +359,22 @@ class AgentAdmitFlask:
 
             user_id = current_user.get(aa.config.user_lookup_field)
             role = aa._determine_role(current_user)
+
+            if aa._require_token_mint_presence is not None:
+                # Presence gate: the hook RAISES to deny (Flask maps a raised
+                # HTTPException / abort()). A non-None return is a contract
+                # violation -> fail closed (500), never a passthrough that a
+                # bare dict would otherwise serialize as a misleading 200.
+                presence_result = aa._require_token_mint_presence(
+                    request=request,
+                    current_user=current_user,
+                    body=data,
+                )
+                if presence_result is not None:
+                    return jsonify({
+                        "error": "presence_hook_misconfigured",
+                        "error_description": "The token-mint presence hook must raise to deny; it must not return a value.",
+                    }), 500
 
             # duration_seconds is tri-state: key absent → hosted default (30
             # days); explicit null → until revoked; integer → explicit duration.

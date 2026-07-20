@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from flask import Flask
+from flask import Flask, jsonify
 
 from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError
 from agentadmit.integrations import flask_integration as fi
@@ -121,6 +121,61 @@ def test_generate_token_stores_local_connection(aa_app, monkeypatch):
     stored = aa.storage.store_connection.call_args[0][0]
     assert stored["connection_id"] == "conn_9"
     assert stored["status"] == "active"
+
+
+def test_generate_token_presence_hook_denial_blocks_hosted_mint(aa_app, monkeypatch):
+    aa, client = aa_app
+    seen = {}
+
+    from flask import abort, make_response, jsonify as _jsonify
+
+    def require_presence(*, request, current_user, body):
+        # Deny by RAISING (the uniform contract). abort() with a JSON response
+        # is the idiomatic Flask way to raise a custom 403.
+        seen["user"] = current_user["user_id"]
+        seen["presence_attestation_id"] = body.get("presence_attestation_id")
+        abort(make_response(_jsonify({
+            "error": "presence_attestation_required",
+            "error_description": "Confirm human presence before generating a connection token.",
+        }), 403))
+
+    aa._require_token_mint_presence = require_presence
+    hosted_post = MagicMock()
+    monkeypatch.setattr(fi.httpx, "post", hosted_post)
+
+    resp = client.post(
+        f"{aa.config.route_prefix}/connections/generate-token",
+        json={"scopes": ["read:things"]},
+    )
+
+    assert resp.status_code == 403
+    assert resp.get_json()["error"] == "presence_attestation_required"
+    assert seen == {"user": "u1", "presence_attestation_id": None}
+    hosted_post.assert_not_called()
+    aa.storage.store_connection.assert_not_called()
+
+
+def test_generate_token_misconfigured_hook_fails_closed(aa_app, monkeypatch):
+    """A Flask hook that RETURNS a bare dict instead of raising must fail
+    closed (500 + no mint) — never let Flask serialize it as a 200."""
+    aa, client = aa_app
+
+    def bad_hook(*, request, current_user, body):
+        return {"error": "denied"}  # operator mistake: returns instead of raising
+
+    aa._require_token_mint_presence = bad_hook
+    hosted_post = MagicMock()
+    monkeypatch.setattr(fi.httpx, "post", hosted_post)
+
+    resp = client.post(
+        f"{aa.config.route_prefix}/connections/generate-token",
+        json={"scopes": ["read:things"]},
+    )
+
+    assert resp.status_code == 500
+    assert resp.get_json()["error"] == "presence_hook_misconfigured"
+    hosted_post.assert_not_called()
+    aa.storage.store_connection.assert_not_called()
 
 
 def test_revoke_fails_honestly_when_hosted_fails(aa_app, monkeypatch):

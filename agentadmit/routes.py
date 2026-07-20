@@ -16,7 +16,7 @@ import secrets
 from typing import Callable, Optional
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -75,6 +75,41 @@ def _call_hosted_service(method: str, path: str, json: dict = None, timeout: flo
         )
 
 
+def _run_token_mint_presence_hook(
+    hook: Optional[Callable],
+    *,
+    request: Request,
+    current_user: dict,
+    body: GenerateTokenRequest,
+):
+    """Run the app's token-mint presence hook when configured.
+
+    The hook is intentionally app-owned: WebAuthn/passkey ceremonies are
+    origin-bound, so the SDK can only enforce that the operator verifies and
+    consumes a fresh, purpose-bound attestation before token minting.
+
+    Contract: the hook DENIES by RAISING (e.g. HTTPException). Returning None
+    allows the mint. A non-None return is a contract violation and FAILS
+    CLOSED (500, mint not reached) so a malformed hook (e.g. one that returns
+    a plain dict) can never produce a misleading success response.
+    """
+    if hook is None:
+        return
+
+    result = hook(request=request, current_user=current_user, body=body)
+    if result is not None:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "presence_hook_misconfigured",
+                "error_description": (
+                    "The token-mint presence hook must raise to deny; it must "
+                    "not return a value."
+                ),
+            },
+        )
+
+
 def create_agentadmit_router(
     get_current_user: Callable = None,
     determine_role: Callable = None,
@@ -82,6 +117,7 @@ def create_agentadmit_router(
     validate_scopes: Callable = None,
     get_endpoints_for_scopes: Callable = None,
     filter_scopes_for_user: Callable = None,
+    require_token_mint_presence: Callable = None,
 ) -> tuple[APIRouter, APIRouter]:
     """
     Create the AgentAdmit FastAPI routers.
@@ -96,6 +132,15 @@ def create_agentadmit_router(
             tuple[list[dict], dict]. If provided, the /scopes endpoint becomes user-aware.
             Returns (filtered_scopes, metadata) where metadata may contain
             {"user_role": str, "user_tier": str, "total_platform": int}.
+        require_token_mint_presence: Optional callable invoked before
+            /connections/generate-token contacts the hosted service, so a
+            computer-use agent riding the user's session cannot mint itself a
+            token. Called as hook(request=..., current_user=..., body=...).
+            RAISE (e.g. HTTPException) to deny; the hook must verify AND
+            consume a fresh, single-use, purpose-bound presence attestation
+            (see body.presence_attestation_id). Returning None allows the
+            mint; any non-None return fails closed (500). Without this hook the
+            route is session-auth-only (previous behavior).
 
     Returns:
         Tuple of (wellknown_router, agentadmit_router).
@@ -177,6 +222,7 @@ def create_agentadmit_router(
         summary="Generate a connection token (user-authenticated)",
     )
     def generate_token(
+        request: Request,
         body: GenerateTokenRequest,
         current_user: dict = Depends(get_current_user),
     ):
@@ -198,6 +244,16 @@ def create_agentadmit_router(
 
         # Check connection cap locally (fast fail)
         check_connection_cap(user_id, user_tier)
+
+        # Presence gate (consume-before-mint): runs after scope + cap
+        # validation so a rejected request never spends an attestation. The
+        # hook raises to deny.
+        _run_token_mint_presence_hook(
+            require_token_mint_presence,
+            request=request,
+            current_user=current_user,
+            body=body,
+        )
 
         # Call AgentAdmit hosted service to generate the connection token.
         # duration_seconds is tri-state: omitted → hosted default (30 days);

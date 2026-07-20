@@ -93,3 +93,47 @@ def test_valid_agent_token_attaches_context(middleware, monkeypatch):
     assert mw(request) == "VIEW_RESPONSE"
     assert request.agentadmit_user["auth_type"] == "agent"
     assert request.agentadmit_user["scopes"] == ["read:things"]
+
+
+def test_generate_token_presence_hook_denial_blocks_hosted_mint(monkeypatch):
+    fake_config = SimpleNamespace(
+        app_id="app_test",
+        api_key="aa_test_dummy",
+        agentadmit_api_url="https://agentadmit.example",
+        user_lookup_field="user_id",
+    )
+    storage = MagicMock()
+    seen = {}
+
+    from django.core.exceptions import PermissionDenied
+
+    def require_presence(*, request, current_user, body):
+        # Deny by RAISING (uniform contract). Django maps PermissionDenied to
+        # 403 via its exception middleware in a real request cycle.
+        seen["user"] = current_user["user_id"]
+        seen["presence_attestation_id"] = body.get("presence_attestation_id")
+        raise PermissionDenied("presence_attestation_required")
+
+    monkeypatch.setattr(di, "_init", lambda: None)
+    monkeypatch.setattr(di, "_config", fake_config)
+    monkeypatch.setattr(di, "_storage", storage)
+    monkeypatch.setattr(di, "_get_current_user", lambda request: {"user_id": "u1"})
+    monkeypatch.setattr(di, "_validate_scopes", lambda scopes, user: (True, []))
+    monkeypatch.setattr(di, "_determine_role", lambda user: "user")
+    monkeypatch.setattr(di, "_require_token_mint_presence", require_presence)
+    hosted_post = MagicMock()
+    monkeypatch.setattr(di.httpx, "post", hosted_post)
+
+    request = SimpleNamespace(
+        method="POST",
+        body=b'{"scopes":["read:things"]}',
+        META={},
+    )
+
+    with pytest.raises(PermissionDenied):
+        di.generate_token_view(request)
+
+    assert seen == {"user": "u1", "presence_attestation_id": None}
+    hosted_post.assert_not_called()
+    storage.store_connection.assert_not_called()
+    storage.store_connection.assert_not_called()

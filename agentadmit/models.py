@@ -42,6 +42,21 @@ class GenerateTokenRequest(BaseModel):
         le=31536000,     # max 1 year (hosted service contract)
     )
     label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'MyAssistant — Workout Tracker')")
+    presence_attestation_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional app-origin human-presence attestation handle. The SDK "
+            "does not validate this directly; pass require_token_mint_presence "
+            "to create_agentadmit_router() to verify and consume it before minting."
+        ),
+    )
+    presence_session_id: Optional[str] = Field(
+        None,
+        description=(
+            "Optional hosted-presence session handle for applications that use "
+            "AgentAdmit's hosted ceremony."
+        ),
+    )
 
 
 class GenerateTokenResponse(BaseModel):
