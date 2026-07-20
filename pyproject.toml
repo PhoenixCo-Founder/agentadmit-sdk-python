@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentadmit"
-version = "1.5.1"
+version = "1.6.0"
 description = "AgentAdmit SDK: user-mediated AI agent authorization for any app"
 readme = "README.md"
 license = {text = "Proprietary"}
