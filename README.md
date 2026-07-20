@@ -229,6 +229,43 @@ async def create_transfer(agent_ctx=Depends(require_presence())):
 
 Flask and Django ship the same guard: `@aa.require_presence()` on the Flask integration, and `require_presence()` from `agentadmit.integrations.django_integration`.
 
+### Presence gate for embedded token minting
+
+If you mount the SDK's user-authenticated `/agentadmit/connections/generate-token`
+route inside your own app, gate that route with your app's own human-presence
+ceremony. A browser-driving agent can ride a logged-in user session, so scoped
+token minting should require a fresh passkey, WebAuthn, or equivalent
+out-of-band confirmation before the hosted token call is made.
+
+FastAPI:
+
+```python
+from fastapi import HTTPException
+
+def require_token_mint_presence(*, request, current_user, body):
+    attestation_id = body.presence_attestation_id
+    if not verify_and_consume_passkey_attestation(
+        user_id=current_user["user_id"],
+        attestation_id=attestation_id,
+        purpose="token_mint",
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "presence_attestation_required"},
+        )
+
+wellknown_router, agentadmit_router = create_agentadmit_router(
+    get_current_user=get_current_user,
+    require_token_mint_presence=require_token_mint_presence,
+)
+```
+
+Flask accepts the same callback name on `AgentAdmitFlask(...)`; Django reads it
+from `AGENTADMIT_CONFIG["require_token_mint_presence"]`. The hook runs after
+user authentication and local request validation, and before AgentAdmit's
+hosted token mint or any local connection record is written. If no hook is
+configured, existing apps keep the previous behavior.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

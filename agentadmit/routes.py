@@ -16,7 +16,7 @@ import secrets
 from typing import Callable, Optional
 
 import httpx
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -75,6 +75,25 @@ def _call_hosted_service(method: str, path: str, json: dict = None, timeout: flo
         )
 
 
+def _run_token_mint_presence_hook(
+    hook: Optional[Callable],
+    *,
+    request: Request,
+    current_user: dict,
+    body: GenerateTokenRequest,
+):
+    """Run the app's token-mint presence hook when configured.
+
+    The hook is intentionally app-owned: WebAuthn/passkey ceremonies are
+    origin-bound, so the SDK can only enforce that the operator verifies and
+    consumes a fresh, purpose-bound attestation before token minting.
+    """
+    if hook is None:
+        return None
+
+    return hook(request=request, current_user=current_user, body=body)
+
+
 def create_agentadmit_router(
     get_current_user: Callable = None,
     determine_role: Callable = None,
@@ -82,6 +101,7 @@ def create_agentadmit_router(
     validate_scopes: Callable = None,
     get_endpoints_for_scopes: Callable = None,
     filter_scopes_for_user: Callable = None,
+    require_token_mint_presence: Callable = None,
 ) -> tuple[APIRouter, APIRouter]:
     """
     Create the AgentAdmit FastAPI routers.
@@ -96,6 +116,10 @@ def create_agentadmit_router(
             tuple[list[dict], dict]. If provided, the /scopes endpoint becomes user-aware.
             Returns (filtered_scopes, metadata) where metadata may contain
             {"user_role": str, "user_tier": str, "total_platform": int}.
+        require_token_mint_presence: Optional callable invoked before
+            /connections/generate-token contacts the hosted service. It is
+            called as hook(request=..., current_user=..., body=...). Raise
+            HTTPException or return a Response to deny the mint.
 
     Returns:
         Tuple of (wellknown_router, agentadmit_router).
@@ -177,6 +201,7 @@ def create_agentadmit_router(
         summary="Generate a connection token (user-authenticated)",
     )
     def generate_token(
+        request: Request,
         body: GenerateTokenRequest,
         current_user: dict = Depends(get_current_user),
     ):
@@ -198,6 +223,15 @@ def create_agentadmit_router(
 
         # Check connection cap locally (fast fail)
         check_connection_cap(user_id, user_tier)
+
+        presence_response = _run_token_mint_presence_hook(
+            require_token_mint_presence,
+            request=request,
+            current_user=current_user,
+            body=body,
+        )
+        if presence_response is not None:
+            return presence_response
 
         # Call AgentAdmit hosted service to generate the connection token.
         # duration_seconds is tri-state: omitted → hosted default (30 days);
