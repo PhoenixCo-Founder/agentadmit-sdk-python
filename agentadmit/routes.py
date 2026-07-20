@@ -60,6 +60,12 @@ def _call_hosted_service(method: str, path: str, json: dict = None, timeout: flo
                 return client.get(url, headers=headers)
             elif method.upper() == "POST":
                 return client.post(url, headers=headers, json=json or {})
+            elif method.upper() == "PUT":
+                # A11: the consent-settings proxy (React SDK's
+                # ConsentSettingsPanel) is a PUT /api/v1/consent/settings.
+                # Without this verb integrators had to hand-roll their own
+                # client (TrainerTracer did).
+                return client.put(url, headers=headers, json=json or {})
             elif method.upper() == "DELETE":
                 return client.delete(url, headers=headers)
             else:
