@@ -241,3 +241,59 @@ def test_generate_token_misconfigured_hook_fails_closed_not_200(generate_app):
     assert resp.json()["detail"]["error"] == "presence_hook_misconfigured"
     assert captured == {}                      # hosted mint never called
     storage.store_connection.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# A11: _call_hosted_service must support PUT (consent-settings proxy).
+# Without it, integrators building the React ConsentSettingsPanel backend
+# proxy (PUT /api/v1/consent/settings) had to hand-roll their own client.
+# ---------------------------------------------------------------------------
+
+def test_call_hosted_service_supports_put(monkeypatch):
+    calls = {}
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def put(self, url, headers=None, json=None):
+            calls["method"] = "PUT"
+            calls["url"] = url
+            calls["json"] = json
+            calls["auth"] = headers.get("Authorization")
+            return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.setattr(routes_mod, "get_config", lambda: SimpleNamespace(
+        agentadmit_api_url="https://agentadmit.example",
+        app_id="app_test",
+        api_key="aa_test_key",
+    ))
+    monkeypatch.setattr(routes_mod.httpx, "Client", _FakeClient)
+
+    resp = routes_mod._call_hosted_service(
+        "PUT",
+        "/api/v1/consent/settings",
+        json={"caller_class": "external_agent", "granted": True},
+    )
+
+    assert resp.status_code == 200
+    assert calls["method"] == "PUT"
+    assert calls["url"].endswith("/api/v1/consent/settings")
+    assert calls["json"] == {"caller_class": "external_agent", "granted": True}
+    assert calls["auth"] == "Bearer aa_test_key"
+
+
+def test_call_hosted_service_rejects_unknown_verb(monkeypatch):
+    monkeypatch.setattr(routes_mod, "get_config", lambda: SimpleNamespace(
+        agentadmit_api_url="https://agentadmit.example",
+        app_id="app_test",
+        api_key="aa_test_key",
+    ))
+    with pytest.raises(ValueError):
+        routes_mod._call_hosted_service("PATCH", "/api/v1/whatever")
