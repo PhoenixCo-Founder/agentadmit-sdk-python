@@ -266,6 +266,12 @@ user authentication and local request validation, and before AgentAdmit's
 hosted token mint or any local connection record is written. If no hook is
 configured, existing apps keep the previous behavior.
 
+**Deny by raising.** The hook must `raise` (an `HTTPException` in FastAPI,
+`abort()` / an exception in Flask/Django) to deny, and must *verify and
+consume* the attestation single-use (checking alone lets it be replayed).
+Returning `None` allows the mint; any other return value fails closed with a
+`500` so a malformed hook can never emit a misleading success response.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

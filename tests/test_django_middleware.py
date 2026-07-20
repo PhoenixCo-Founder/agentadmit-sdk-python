@@ -105,13 +105,14 @@ def test_generate_token_presence_hook_denial_blocks_hosted_mint(monkeypatch):
     storage = MagicMock()
     seen = {}
 
+    from django.core.exceptions import PermissionDenied
+
     def require_presence(*, request, current_user, body):
+        # Deny by RAISING (uniform contract). Django maps PermissionDenied to
+        # 403 via its exception middleware in a real request cycle.
         seen["user"] = current_user["user_id"]
         seen["presence_attestation_id"] = body.get("presence_attestation_id")
-        return di.JsonResponse({
-            "error": "presence_attestation_required",
-            "error_description": "Confirm human presence before generating a connection token.",
-        }, status=403)
+        raise PermissionDenied("presence_attestation_required")
 
     monkeypatch.setattr(di, "_init", lambda: None)
     monkeypatch.setattr(di, "_config", fake_config)
@@ -129,10 +130,10 @@ def test_generate_token_presence_hook_denial_blocks_hosted_mint(monkeypatch):
         META={},
     )
 
-    response = di.generate_token_view(request)
+    with pytest.raises(PermissionDenied):
+        di.generate_token_view(request)
 
-    assert response.status_code == 403
-    assert b"presence_attestation_required" in response.content
     assert seen == {"user": "u1", "presence_attestation_id": None}
     hosted_post.assert_not_called()
+    storage.store_connection.assert_not_called()
     storage.store_connection.assert_not_called()

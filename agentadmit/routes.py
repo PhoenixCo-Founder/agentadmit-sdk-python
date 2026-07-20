@@ -87,11 +87,27 @@ def _run_token_mint_presence_hook(
     The hook is intentionally app-owned: WebAuthn/passkey ceremonies are
     origin-bound, so the SDK can only enforce that the operator verifies and
     consumes a fresh, purpose-bound attestation before token minting.
+
+    Contract: the hook DENIES by RAISING (e.g. HTTPException). Returning None
+    allows the mint. A non-None return is a contract violation and FAILS
+    CLOSED (500, mint not reached) so a malformed hook (e.g. one that returns
+    a plain dict) can never produce a misleading success response.
     """
     if hook is None:
-        return None
+        return
 
-    return hook(request=request, current_user=current_user, body=body)
+    result = hook(request=request, current_user=current_user, body=body)
+    if result is not None:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "presence_hook_misconfigured",
+                "error_description": (
+                    "The token-mint presence hook must raise to deny; it must "
+                    "not return a value."
+                ),
+            },
+        )
 
 
 def create_agentadmit_router(
@@ -117,9 +133,14 @@ def create_agentadmit_router(
             Returns (filtered_scopes, metadata) where metadata may contain
             {"user_role": str, "user_tier": str, "total_platform": int}.
         require_token_mint_presence: Optional callable invoked before
-            /connections/generate-token contacts the hosted service. It is
-            called as hook(request=..., current_user=..., body=...). Raise
-            HTTPException or return a Response to deny the mint.
+            /connections/generate-token contacts the hosted service, so a
+            computer-use agent riding the user's session cannot mint itself a
+            token. Called as hook(request=..., current_user=..., body=...).
+            RAISE (e.g. HTTPException) to deny; the hook must verify AND
+            consume a fresh, single-use, purpose-bound presence attestation
+            (see body.presence_attestation_id). Returning None allows the
+            mint; any non-None return fails closed (500). Without this hook the
+            route is session-auth-only (previous behavior).
 
     Returns:
         Tuple of (wellknown_router, agentadmit_router).
@@ -224,14 +245,15 @@ def create_agentadmit_router(
         # Check connection cap locally (fast fail)
         check_connection_cap(user_id, user_tier)
 
-        presence_response = _run_token_mint_presence_hook(
+        # Presence gate (consume-before-mint): runs after scope + cap
+        # validation so a rejected request never spends an attestation. The
+        # hook raises to deny.
+        _run_token_mint_presence_hook(
             require_token_mint_presence,
             request=request,
             current_user=current_user,
             body=body,
         )
-        if presence_response is not None:
-            return presence_response
 
         # Call AgentAdmit hosted service to generate the connection token.
         # duration_seconds is tri-state: omitted → hosted default (30 days);

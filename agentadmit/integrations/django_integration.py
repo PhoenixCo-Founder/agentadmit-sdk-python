@@ -409,13 +409,18 @@ def generate_token_view(request):
     role = _determine_role(current_user)
 
     if _require_token_mint_presence is not None:
-        presence_response = _require_token_mint_presence(
+        # Presence gate: the hook RAISES to deny. A non-None return is a
+        # contract violation -> fail closed (500), never a passthrough.
+        presence_result = _require_token_mint_presence(
             request=request,
             current_user=current_user,
             body=data,
         )
-        if presence_response is not None:
-            return presence_response
+        if presence_result is not None:
+            return JsonResponse({
+                "error": "presence_hook_misconfigured",
+                "error_description": "The token-mint presence hook must raise to deny; it must not return a value.",
+            }, status=500)
 
     # duration_seconds is tri-state: key absent → hosted default (30 days);
     # explicit null → until revoked; integer → explicit duration.

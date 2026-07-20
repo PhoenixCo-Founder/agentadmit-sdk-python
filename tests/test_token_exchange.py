@@ -222,3 +222,22 @@ def test_generate_token_presence_hook_acceptance_allows_hosted_mint(generate_app
     assert seen == {"user": "u1", "presence_attestation_id": "patt_ok"}
     assert captured["path"] == "/api/v1/apps/app_test/token"
     storage.store_connection.assert_called_once()
+
+
+def test_generate_token_misconfigured_hook_fails_closed_not_200(generate_app):
+    """A hook that RETURNS a value instead of raising to deny must fail closed
+    (500 + no mint), never let the truthy return pass through as a success."""
+    make_client, captured, storage = generate_app
+
+    def bad_hook(*, request, current_user, body):
+        # Operator mistake: returns a dict thinking it denies, instead of raising.
+        return {"error": "denied"}
+
+    client, token_path = make_client(bad_hook)
+
+    resp = client.post(token_path, json={"scopes": ["read:things"]})
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["error"] == "presence_hook_misconfigured"
+    assert captured == {}                      # hosted mint never called
+    storage.store_connection.assert_not_called()
