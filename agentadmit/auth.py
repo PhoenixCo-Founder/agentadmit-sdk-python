@@ -351,6 +351,16 @@ def get_agentadmit_user(
     if isinstance(presence, dict) and isinstance(presence.get("verified"), bool):
         context["presence"] = presence
 
+    # Declared purpose rides along when the platform returns it (additive):
+    # the user-facing reason recorded on the grant at the consent moment.
+    # Review-time record only, never an enforcement input; authorization
+    # decisions ride scopes, connection status, and consent. Absent on older
+    # servers and on grants recorded without one; non-string junk is dropped
+    # without failing the verify result.
+    purpose = introspection_data.get("purpose")
+    if isinstance(purpose, str):
+        context["purpose"] = purpose
+
     return context
 
 

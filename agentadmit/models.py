@@ -25,6 +25,39 @@ VERIFY_ERROR_CODES = (
 
 
 # ---------------------------------------------------------------------------
+# Verify (introspection) response
+# ---------------------------------------------------------------------------
+
+class VerifyResponse(BaseModel):
+    """Typed view of the hosted POST /api/v1/verify introspection response.
+
+    The SDK's middleware/decorators consume the raw dict internally; this
+    model is for integrators who call /verify directly (e.g. STDIO MCP
+    servers) and want a typed result. Unknown fields from newer servers are
+    ignored, so parsing stays forward-compatible.
+    """
+    active: bool = Field(False, description="RFC 7662-style active flag. False for invalid/expired/revoked tokens (still HTTP 200).")
+    error: Optional[str] = Field(None, description="One of VERIFY_ERROR_CODES when active is false.")
+    user_id: Optional[str] = None
+    connection_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_label: Optional[str] = None
+    scopes: list[str] = Field(default_factory=list, description="Granted scopes")
+    purpose: Optional[str] = Field(
+        None,
+        description=(
+            "Declared purpose: the user-facing reason recorded on the grant at "
+            "the consent moment. Review-time record only, never an enforcement "
+            "input; authorization decisions ride scopes, connection status, "
+            "and consent. Null/absent on older servers and on grants recorded "
+            "without one."
+        ),
+    )
+    consent: Optional[dict[str, Any]] = Field(None, description="Consent Ledger verdict, when the platform returns it.")
+    presence: Optional[dict[str, Any]] = Field(None, description="Human-presence fact (WebAuthn step-up), when the platform returns it.")
+
+
+# ---------------------------------------------------------------------------
 # Token generation (user-authenticated)
 # ---------------------------------------------------------------------------
 
@@ -42,6 +75,17 @@ class GenerateTokenRequest(BaseModel):
         le=31536000,     # max 1 year (hosted service contract)
     )
     label: Optional[str] = Field(None, description="Human-readable label for this connection (e.g. 'MyAssistant — Workout Tracker')")
+    purpose: Optional[str] = Field(
+        None,
+        description=(
+            "Declared purpose: the user-facing reason recorded on the grant at "
+            "the consent moment (1–300 characters). Review-time record only, "
+            "never an enforcement input; authorization decisions ride scopes, "
+            "connection status, and consent. Length is enforced by the route "
+            "handler (400 invalid_request), and the field is omitted from the "
+            "hosted mint call when absent."
+        ),
+    )
     presence_attestation_id: Optional[str] = Field(
         None,
         description=(

@@ -272,6 +272,46 @@ consume* the attestation single-use (checking alone lets it be replayed).
 Returning `None` allows the mint; any other return value fails closed with a
 `500` so a malformed hook can never emit a misleading success response.
 
+## Declared Purpose
+
+Declared purpose: the user-facing reason recorded on the grant at the consent
+moment. Review-time record only, never an enforcement input; authorization
+decisions ride scopes, connection status, and consent.
+
+Pass an optional `purpose` (1–300 characters) when generating a connection
+token. The SDK forwards it to the hosted mint, where it is shown to the human
+on the consent page ("Declared purpose: …"), stamped into every audit log row,
+and returned by `/verify` introspection:
+
+```json
+POST /agentadmit/connections/generate-token
+{
+  "scopes": ["read:workouts"],
+  "purpose": "Book my Tuesday workout sessions"
+}
+```
+
+The field works the same on the FastAPI router, the Flask blueprint, and the
+Django view. Omit it to mint without one — existing callers keep working. A
+purpose over 300 characters is rejected locally with `400 invalid_request`
+before any hosted call, and the field has no interaction with the token-mint
+presence hook.
+
+On verification, the purpose appears on the agent context as
+`auth_ctx["purpose"]` when the platform returns it (older servers omit it, as
+do grants recorded without one). Integrators calling `/verify` directly — the
+STDIO MCP pattern above — can parse the response with the typed
+`VerifyResponse` model; `purpose` is `Optional[str]` and defaults to `None`
+when absent:
+
+```python
+from agentadmit import VerifyResponse
+
+result = VerifyResponse.model_validate(resp.json())
+if result.purpose:
+    show_in_review_ui(result.purpose)  # display/audit only — never an access decision
+```
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.
