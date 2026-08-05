@@ -311,6 +311,9 @@ def create_agentadmit_router(
             "scopes": body.scopes,
             "role": role,
             "agent_label": body.label,
+            # Declared purpose is persisted locally so GET /connections
+            # (served from this store) can surface it. None when absent.
+            "purpose": body.purpose,
             "duration_seconds": body.duration_seconds if "duration_seconds" in body.model_fields_set else None,
             "status": "active",
         })
@@ -492,6 +495,7 @@ def create_agentadmit_router(
                 "role": c.get("role", "user"),
                 "agent_label": agent_label,
                 "label": agent_label,  # alias for frontend compatibility
+                "purpose": c.get("purpose"),
                 "agent_id": c.get("agent_id"),
                 "status": c.get("status"),
                 "created_at": _serialize_dt(c.get("created_at")),
