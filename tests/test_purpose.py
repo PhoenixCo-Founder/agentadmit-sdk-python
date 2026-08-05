@@ -11,8 +11,13 @@ nulls). Over-long purposes are rejected locally with 400 invalid_request
 before any hosted call. The hosted /verify response carries a nullable
 `purpose`; it parses on the typed VerifyResponse model (None when absent)
 and rides along on the agent context like consent/presence do.
+
+The mint routes also persist `purpose` in the LOCAL connection store (the
+record GET /connections is served from), so the admin panel listing can
+surface it: present when declared, None when absent.
 """
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -341,6 +346,162 @@ def test_django_generate_token_rejects_301_char_purpose(django_env, monkeypatch)
     assert b"invalid_request" in response.content
     hosted_post.assert_not_called()
     storage.store_connection.assert_not_called()
+
+
+# ===========================================================================
+# Local connection store + GET /connections — purpose persisted at mint
+# ===========================================================================
+#
+# The listing is served from LOCAL storage, not the hosted mint — so the
+# store_connection write at mint time must carry the declared purpose for
+# the admin panel to ever show it. End-to-end against a real MemoryStorage:
+# mint with purpose → the local record and the listing carry it; mint
+# without → None.
+
+@pytest.fixture()
+def generate_app_memory(monkeypatch):
+    """FastAPI app with a real MemoryStorage backing mint + listing."""
+    fake_config = SimpleNamespace(
+        app_id="app_test",
+        app_name="Test App",
+        api_key="aa_test_key",
+        api_base_url="http://testserver",
+        agentadmit_api_url="https://agentadmit.example",
+        route_prefix="/agentadmit",
+        default_tier="standard",
+        user_lookup_field="user_id",
+        connection_token_ttl=3600,
+        scopes=[SimpleNamespace(name="read:things", description="d",
+                                category="c", role="user")],
+        tiers=[],
+    )
+    monkeypatch.setattr(routes_mod, "get_config", lambda: fake_config)
+    storage = MemoryStorage()
+    monkeypatch.setattr(routes_mod, "_get_storage", lambda: storage)
+    monkeypatch.setattr(routes_mod, "check_connection_cap", lambda *a, **k: None)
+
+    counter = {"n": 0}
+
+    def fake_hosted(method, path, json=None, timeout=10.0, authenticated=True):
+        counter["n"] += 1
+        return httpx.Response(
+            201,
+            json={"token": "ag_ct_new", "connection_id": f"conn_{counter['n']}",
+                  "expires_in": 3600},
+        )
+
+    monkeypatch.setattr(routes_mod, "_call_hosted_service", fake_hosted)
+
+    _wellknown, router = routes_mod.create_agentadmit_router(
+        get_current_user=lambda: {"user_id": "u1"},
+    )
+    app = FastAPI()
+    app.include_router(router)
+    token_path = next(r.path for r in router.routes
+                      if r.path.endswith("/connections/generate-token"))
+    list_path = next(r.path for r in router.routes
+                     if r.path.endswith("/connections") and "GET" in r.methods)
+    return TestClient(app), token_path, list_path, storage
+
+
+def test_fastapi_mint_persists_purpose_and_listing_surfaces_it(generate_app_memory):
+    client, token_path, list_path, storage = generate_app_memory
+
+    resp = client.post(token_path, json={"scopes": ["read:things"], "purpose": PURPOSE})
+    assert resp.status_code == 200
+
+    records = storage.list_connections("u1")
+    assert len(records) == 1
+    assert records[0]["purpose"] == PURPOSE
+
+    listing = client.get(list_path).json()
+    assert listing["total"] == 1
+    assert listing["connections"][0]["purpose"] == PURPOSE
+
+
+def test_fastapi_mint_without_purpose_lists_null(generate_app_memory):
+    client, token_path, list_path, storage = generate_app_memory
+
+    resp = client.post(token_path, json={"scopes": ["read:things"]})
+    assert resp.status_code == 200
+
+    assert storage.list_connections("u1")[0]["purpose"] is None
+    listing = client.get(list_path).json()
+    assert listing["connections"][0]["purpose"] is None
+
+
+def _hosted_mint_ok(url, headers=None, json=None, timeout=None):
+    return httpx.Response(
+        200, json={"token": "ag_ct_new", "connection_id": "conn_9", "expires_in": 3600})
+
+
+def test_flask_mint_persists_purpose_and_listing_surfaces_it(flask_app, monkeypatch):
+    aa, client = flask_app
+    aa.storage = MemoryStorage()
+    monkeypatch.setattr(fi.httpx, "post", _hosted_mint_ok)
+
+    resp = client.post(
+        f"{aa.config.route_prefix}/connections/generate-token",
+        json={"scopes": ["read:things"], "purpose": PURPOSE},
+    )
+    assert resp.status_code == 200
+
+    records = aa.storage.list_connections("u1")
+    assert len(records) == 1
+    assert records[0]["purpose"] == PURPOSE
+
+    listing = client.get(f"{aa.config.route_prefix}/connections").get_json()
+    assert listing["total"] == 1
+    assert listing["connections"][0]["purpose"] == PURPOSE
+
+
+def test_flask_mint_without_purpose_lists_null(flask_app, monkeypatch):
+    aa, client = flask_app
+    aa.storage = MemoryStorage()
+    monkeypatch.setattr(fi.httpx, "post", _hosted_mint_ok)
+
+    resp = client.post(
+        f"{aa.config.route_prefix}/connections/generate-token",
+        json={"scopes": ["read:things"]},
+    )
+    assert resp.status_code == 200
+
+    assert aa.storage.list_connections("u1")[0]["purpose"] is None
+    listing = client.get(f"{aa.config.route_prefix}/connections").get_json()
+    assert listing["connections"][0]["purpose"] is None
+
+
+def test_django_mint_persists_purpose_and_listing_surfaces_it(django_env, monkeypatch):
+    memory = MemoryStorage()
+    monkeypatch.setattr(di, "_storage", memory)
+    monkeypatch.setattr(di.httpx, "post", _hosted_mint_ok)
+
+    response = di.generate_token_view(_django_post(
+        b'{"scopes":["read:things"],"purpose":"Book my Tuesday workout sessions"}'))
+    assert response.status_code == 200
+
+    records = memory.list_connections("u1")
+    assert len(records) == 1
+    assert records[0]["purpose"] == PURPOSE
+
+    listing = json.loads(di.connections_view(
+        SimpleNamespace(method="GET", META={})).content)
+    assert listing["total"] == 1
+    assert listing["connections"][0]["purpose"] == PURPOSE
+
+
+def test_django_mint_without_purpose_lists_null(django_env, monkeypatch):
+    memory = MemoryStorage()
+    monkeypatch.setattr(di, "_storage", memory)
+    monkeypatch.setattr(di.httpx, "post", _hosted_mint_ok)
+
+    response = di.generate_token_view(_django_post(b'{"scopes":["read:things"]}'))
+    assert response.status_code == 200
+
+    assert memory.list_connections("u1")[0]["purpose"] is None
+    listing = json.loads(di.connections_view(
+        SimpleNamespace(method="GET", META={})).content)
+    assert listing["connections"][0]["purpose"] is None
 
 
 # ===========================================================================

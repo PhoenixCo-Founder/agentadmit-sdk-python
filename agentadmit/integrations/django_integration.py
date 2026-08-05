@@ -487,6 +487,9 @@ def generate_token_view(request):
             "scopes": scopes,
             "role": role,
             "agent_label": data.get("label"),
+            # Declared purpose is persisted locally so GET /connections
+            # (served from this store) can surface it.
+            "purpose": purpose,
             "duration_seconds": data.get("duration_seconds") if "duration_seconds" in data else None,
             "status": "active",
         })
