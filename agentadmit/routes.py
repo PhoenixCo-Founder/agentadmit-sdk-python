@@ -244,6 +244,21 @@ def create_agentadmit_router(
                 },
             )
 
+        # Declared purpose: the user-facing reason recorded on the grant at
+        # the consent moment. Review-time record only, never an enforcement
+        # input; authorization decisions ride scopes, connection status, and
+        # consent. Local length check (1–300) before any hosted call — and
+        # before the presence hook, so an invalid request never spends an
+        # attestation.
+        if body.purpose is not None and not (1 <= len(body.purpose) <= 300):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_request",
+                    "error_description": "purpose must be between 1 and 300 characters.",
+                },
+            )
+
         user_id = current_user.get(config.user_lookup_field)
         role = determine_role(current_user)
         user_tier = get_user_tier(current_user)
@@ -271,6 +286,10 @@ def create_agentadmit_router(
         }
         if "duration_seconds" in body.model_fields_set:
             payload["duration_seconds"] = body.duration_seconds
+        # Declared purpose is optional: include when provided, omit entirely
+        # when absent (the hosted service rejects explicit JSON nulls).
+        if body.purpose is not None:
+            payload["purpose"] = body.purpose
 
         resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json=payload)
 

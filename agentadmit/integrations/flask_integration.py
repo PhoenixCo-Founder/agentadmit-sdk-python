@@ -173,6 +173,14 @@ class AgentAdmitFlask:
         if isinstance(presence, dict) and isinstance(presence.get("verified"), bool):
             context["presence"] = presence
 
+        # Declared purpose rides along when the platform returns it (additive):
+        # the user-facing reason recorded on the grant at the consent moment.
+        # Review-time record only, never an enforcement input; authorization
+        # decisions ride scopes, connection status, and consent.
+        purpose = data.get("purpose")
+        if isinstance(purpose, str):
+            context["purpose"] = purpose
+
         return context
 
     def get_current_user_or_agent(self) -> dict:
@@ -357,6 +365,21 @@ class AgentAdmitFlask:
             if not all_valid:
                 return jsonify({"error": "invalid_scope", "invalid_scopes": invalid}), 400
 
+            # Declared purpose: the user-facing reason recorded on the grant
+            # at the consent moment. Review-time record only, never an
+            # enforcement input; authorization decisions ride scopes,
+            # connection status, and consent. Local length check (1–300)
+            # before any hosted call — and before the presence hook, so an
+            # invalid request never spends an attestation.
+            purpose = data.get("purpose")
+            if purpose is not None and (
+                not isinstance(purpose, str) or not (1 <= len(purpose) <= 300)
+            ):
+                return jsonify({
+                    "error": "invalid_request",
+                    "error_description": "purpose must be a string between 1 and 300 characters.",
+                }), 400
+
             user_id = current_user.get(aa.config.user_lookup_field)
             role = aa._determine_role(current_user)
 
@@ -385,6 +408,10 @@ class AgentAdmitFlask:
             }
             if "duration_seconds" in data:
                 payload["duration_seconds"] = data["duration_seconds"]
+            # Declared purpose is optional: include when provided, omit
+            # entirely when absent (the hosted service rejects explicit nulls).
+            if purpose is not None:
+                payload["purpose"] = purpose
 
             try:
                 resp = httpx.post(
