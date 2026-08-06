@@ -471,7 +471,7 @@ conn_config = get_alert_config(app_id="app_abc123", connection_id="conn_xyz")
 AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data - you deliver it through your own system (in-app notifications, email, push, etc.).
 
 - **Poll alerts** - Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
-- **Webhook delivery** - Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_...` secret. Always verify the signature before trusting the payload:
+- **Webhook delivery** - Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_...` secret. The payload carries `alert_id`, `alert_type`, `severity`, the connection's `agent_label`, and the grant's declared `purpose`; the full shape is documented in the Webhook Delivery section of the MCP guide at https://agentadmit.com/docs/mcp-guide. Always verify the signature before trusting the payload:
 
   ```python
   from agentadmit import verify_webhook_signature, WebhookSignatureError
