@@ -361,6 +361,16 @@ def get_agentadmit_user(
     if isinstance(purpose, str):
         context["purpose"] = purpose
 
+    # User-declared intent rides along the same way (additive): the user's
+    # own words, typed at the consent moment (distinct from purpose, which is
+    # the app's words). Review-time record only, never an enforcement input;
+    # authorization decisions ride scopes, connection status, and consent.
+    # Absent on older servers and on grants recorded without one; non-string
+    # junk is dropped without failing the verify result.
+    user_intent = introspection_data.get("user_intent")
+    if isinstance(user_intent, str):
+        context["user_intent"] = user_intent
+
     return context
 
 

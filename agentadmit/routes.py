@@ -259,6 +259,21 @@ def create_agentadmit_router(
                 },
             )
 
+        # User-declared intent: the user's own words, typed at the consent
+        # moment (distinct from purpose, which is the app's words).
+        # Review-time record only, never an enforcement input; authorization
+        # decisions ride scopes, connection status, and consent. Same local
+        # length check (1–300) before any hosted call — and before the
+        # presence hook, so an invalid request never spends an attestation.
+        if body.user_intent is not None and not (1 <= len(body.user_intent) <= 300):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "invalid_request",
+                    "error_description": "user_intent must be between 1 and 300 characters.",
+                },
+            )
+
         user_id = current_user.get(config.user_lookup_field)
         role = determine_role(current_user)
         user_tier = get_user_tier(current_user)
@@ -290,6 +305,10 @@ def create_agentadmit_router(
         # when absent (the hosted service rejects explicit JSON nulls).
         if body.purpose is not None:
             payload["purpose"] = body.purpose
+        # User-declared intent is optional too: include when provided, omit
+        # entirely when absent (the hosted service rejects explicit JSON nulls).
+        if body.user_intent is not None:
+            payload["user_intent"] = body.user_intent
 
         resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json=payload)
 
@@ -314,6 +333,8 @@ def create_agentadmit_router(
             # Declared purpose is persisted locally so GET /connections
             # (served from this store) can surface it. None when absent.
             "purpose": body.purpose,
+            # User-declared intent is persisted locally for the same reason.
+            "user_intent": body.user_intent,
             "duration_seconds": body.duration_seconds if "duration_seconds" in body.model_fields_set else None,
             "status": "active",
         })
@@ -496,6 +517,7 @@ def create_agentadmit_router(
                 "agent_label": agent_label,
                 "label": agent_label,  # alias for frontend compatibility
                 "purpose": c.get("purpose"),
+                "user_intent": c.get("user_intent"),
                 "agent_id": c.get("agent_id"),
                 "status": c.get("status"),
                 "created_at": _serialize_dt(c.get("created_at")),
