@@ -312,6 +312,51 @@ if result.purpose:
     show_in_review_ui(result.purpose)  # display/audit only — never an access decision
 ```
 
+## User-Declared Intent
+
+User-declared intent: the user's own words, typed at the consent moment.
+Where `purpose` is the app's words (what the application says the grant is
+for), `user_intent` is what the user themselves typed when approving it.
+Review-time record only, never an enforcement input; authorization decisions
+ride scopes, connection status, and consent.
+
+Pass an optional `user_intent` (1–300 characters) when generating a
+connection token. It flows identically to `purpose`: forwarded to the hosted
+mint, recorded on the grant, stamped into audit log rows and ledger events,
+and returned by `/verify` introspection:
+
+```json
+POST /agentadmit/connections/generate-token
+{
+  "scopes": ["read:workouts"],
+  "purpose": "Book my Tuesday workout sessions",
+  "user_intent": "I want my assistant to handle my gym schedule for me"
+}
+```
+
+The field works the same on the FastAPI router, the Flask blueprint, and the
+Django view. Omit it to mint without one — existing callers keep working. A
+`user_intent` over 300 characters is rejected locally with
+`400 invalid_request` before any hosted call, and the field has no
+interaction with the token-mint presence hook.
+
+When the hosted presence ceremony runs, `user_intent` is included in the
+verifiable-consent-evidence commitment — the user's authenticator signs their
+own words alongside the rest of the grant record.
+
+On verification, it appears on the agent context as
+`auth_ctx["user_intent"]` when the platform returns it (older servers omit
+it, as do grants recorded without one). On the typed `VerifyResponse` model,
+`user_intent` is `Optional[str]` and defaults to `None` when absent:
+
+```python
+from agentadmit import VerifyResponse
+
+result = VerifyResponse.model_validate(resp.json())
+if result.user_intent:
+    show_in_review_ui(result.user_intent)  # display/audit only — never an access decision
+```
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

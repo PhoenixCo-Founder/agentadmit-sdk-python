@@ -53,6 +53,17 @@ class VerifyResponse(BaseModel):
             "without one."
         ),
     )
+    user_intent: Optional[str] = Field(
+        None,
+        description=(
+            "User-declared intent: the user's own words, typed at the consent "
+            "moment (distinct from purpose, which is the app's words). "
+            "Review-time record only, never an enforcement input; "
+            "authorization decisions ride scopes, connection status, and "
+            "consent. Null/absent on older servers and on grants recorded "
+            "without one."
+        ),
+    )
     consent: Optional[dict[str, Any]] = Field(None, description="Consent Ledger verdict, when the platform returns it.")
     presence: Optional[dict[str, Any]] = Field(None, description="Human-presence fact (WebAuthn step-up), when the platform returns it.")
 
@@ -84,6 +95,18 @@ class GenerateTokenRequest(BaseModel):
             "connection status, and consent. Length is enforced by the route "
             "handler (400 invalid_request), and the field is omitted from the "
             "hosted mint call when absent."
+        ),
+    )
+    user_intent: Optional[str] = Field(
+        None,
+        description=(
+            "User-declared intent: the user's own words, typed at the consent "
+            "moment (1–300 characters). Distinct from purpose, which is the "
+            "app's words. Review-time record only, never an enforcement "
+            "input; authorization decisions ride scopes, connection status, "
+            "and consent. Length is enforced by the route handler (400 "
+            "invalid_request), and the field is omitted from the hosted mint "
+            "call when absent."
         ),
     )
     presence_attestation_id: Optional[str] = Field(

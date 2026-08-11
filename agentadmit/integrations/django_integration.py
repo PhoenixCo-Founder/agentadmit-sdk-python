@@ -196,6 +196,14 @@ def _validate_agent_token(token: str) -> dict:
     if isinstance(purpose, str):
         context["purpose"] = purpose
 
+    # User-declared intent rides along the same way (additive): the user's
+    # own words, typed at the consent moment (distinct from purpose, which
+    # is the app's words). Review-time record only, never an enforcement
+    # input.
+    user_intent = data.get("user_intent")
+    if isinstance(user_intent, str):
+        context["user_intent"] = user_intent
+
     return context
 
 
@@ -427,6 +435,19 @@ def generate_token_view(request):
             "error_description": "purpose must be a string between 1 and 300 characters.",
         }, status=400)
 
+    # User-declared intent: the user's own words, typed at the consent moment
+    # (distinct from purpose, which is the app's words). Review-time record
+    # only, never an enforcement input. Same local length check (1–300)
+    # before any hosted call — and before the presence hook.
+    user_intent = data.get("user_intent")
+    if user_intent is not None and (
+        not isinstance(user_intent, str) or not (1 <= len(user_intent) <= 300)
+    ):
+        return JsonResponse({
+            "error": "invalid_request",
+            "error_description": "user_intent must be a string between 1 and 300 characters.",
+        }, status=400)
+
     user_id = current_user.get(_config.user_lookup_field)
     role = _determine_role(current_user)
 
@@ -457,6 +478,10 @@ def generate_token_view(request):
     # absent (the hosted service rejects explicit nulls).
     if purpose is not None:
         payload["purpose"] = purpose
+    # User-declared intent is optional too: include when provided, omit
+    # entirely when absent.
+    if user_intent is not None:
+        payload["user_intent"] = user_intent
 
     try:
         resp = httpx.post(
@@ -490,6 +515,8 @@ def generate_token_view(request):
             # Declared purpose is persisted locally so GET /connections
             # (served from this store) can surface it.
             "purpose": purpose,
+            # User-declared intent is persisted locally for the same reason.
+            "user_intent": user_intent,
             "duration_seconds": data.get("duration_seconds") if "duration_seconds" in data else None,
             "status": "active",
         })
