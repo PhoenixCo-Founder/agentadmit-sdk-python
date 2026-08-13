@@ -41,7 +41,7 @@ from agentadmit.alerts import (
 )
 from agentadmit.consent import check_consent, CALLER_CLASSES
 from agentadmit.callerconsent import caller_consent, classify_caller
-from agentadmit.models import VERIFY_ERROR_CODES, VerifyResponse
+from agentadmit.models import VERIFY_ERROR_CODES, AppAttestedPresence, VerifyResponse
 from agentadmit.webhooks import (
     verify_webhook_signature,
     is_valid_webhook_signature,
@@ -89,6 +89,9 @@ __all__ = [
     # Verify error codes, typed verify response + webhook signature verification
     "VERIFY_ERROR_CODES",
     "VerifyResponse",
+
+    # App-attested presence (typed forwarding at token issuance)
+    "AppAttestedPresence",
     "verify_webhook_signature",
     "is_valid_webhook_signature",
 

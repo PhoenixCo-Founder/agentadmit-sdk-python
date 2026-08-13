@@ -4,8 +4,10 @@ agentadmit.models
 Pydantic request/response models for AgentAdmit API endpoints.
 """
 
-from typing import Any, Optional
-from pydantic import BaseModel, Field
+import re
+from datetime import datetime
+from typing import Any, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +68,86 @@ class VerifyResponse(BaseModel):
     )
     consent: Optional[dict[str, Any]] = Field(None, description="Consent Ledger verdict, when the platform returns it.")
     presence: Optional[dict[str, Any]] = Field(None, description="Human-presence fact (WebAuthn step-up), when the platform returns it.")
+
+
+# ---------------------------------------------------------------------------
+# App-attested presence (typed forwarding at token issuance)
+# ---------------------------------------------------------------------------
+
+_PRESENCE_METHOD_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+class AppAttestedPresence(BaseModel):
+    """A ceremony fact your app attests at token issuance.
+
+    Return an instance from the ``require_token_mint_presence`` hook AFTER
+    verifying and consuming your own fresh, purpose-bound WebAuthn/passkey
+    attestation. The SDK forwards it to the hosted mint as
+    ``presence: {verified: true, uv: true, method, verified_at}``; the hosted
+    service stores it method-prefixed ``app:<method>`` — the provenance marker
+    that keeps app-attested facts distinct from hosted-witnessed ceremonies.
+
+    Honesty ceiling: this is YOUR attestation, recorded and provenance-marked,
+    not witnessed by AgentAdmit and not independently verifiable. Only
+    construct one for a ceremony that verified the user with UV (biometric or
+    PIN user verification); ``verified``/``uv`` are literal ``True`` — a
+    ceremony without UV carries no presence fact, so simply return ``None``.
+
+    ``verified_at`` MUST be timezone-aware (the hosted service rejects naive
+    timestamps) and recent — the hosted mint enforces a 10-minute freshness
+    window with 60 seconds of future clock-skew slack.
+    """
+
+    verified: Literal[True] = True
+    uv: Literal[True] = True
+    method: str = Field(
+        ...,
+        min_length=1,
+        max_length=60,
+        description=(
+            "Your ceremony mechanism, lowercase alphanumeric/underscore "
+            "(e.g. 'tt_webauthn'). Stored as 'app:<method>'."
+        ),
+    )
+    verified_at: datetime = Field(
+        ...,
+        description=(
+            "When the ceremony completed. Must be timezone-aware; serialized "
+            "RFC 3339 with offset. The hosted service enforces freshness "
+            "(10 minutes, 60 s future skew)."
+        ),
+    )
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, v: str) -> str:
+        if not _PRESENCE_METHOD_RE.match(v):
+            raise ValueError(
+                "method must be lowercase alphanumeric/underscore (e.g. 'tt_webauthn')"
+            )
+        return v
+
+    @field_validator("verified_at")
+    @classmethod
+    def _require_offset_aware(cls, v: datetime) -> datetime:
+        # A naive datetime serializes without an offset and the hosted mint
+        # rejects it with 400 — a proven production-outage class. Fail here,
+        # at construction, where the fix is obvious.
+        if v.tzinfo is None or v.tzinfo.utcoffset(v) is None:
+            raise ValueError(
+                "verified_at must be timezone-aware (e.g. datetime.now(timezone.utc)); "
+                "naive timestamps serialize without an offset and the hosted mint rejects them"
+            )
+        return v
+
+    def to_wire(self) -> dict[str, Any]:
+        """The exact JSON object forwarded to the hosted mint."""
+        return {
+            "verified": True,
+            "uv": True,
+            "method": self.method,
+            "verified_at": self.verified_at.isoformat(),
+        }
 
 
 # ---------------------------------------------------------------------------
