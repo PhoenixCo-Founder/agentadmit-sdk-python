@@ -28,6 +28,7 @@ from flask import Blueprint, Flask, g, jsonify, request
 
 from agentadmit.auth import _introspect_with_retry, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
+from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage, StorageBackend
 from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError
 
@@ -405,20 +406,25 @@ class AgentAdmitFlask:
             user_id = current_user.get(aa.config.user_lookup_field)
             role = aa._determine_role(current_user)
 
+            presence_fact = None
             if aa._require_token_mint_presence is not None:
                 # Presence gate: the hook RAISES to deny (Flask maps a raised
-                # HTTPException / abort()). A non-None return is a contract
-                # violation -> fail closed (500), never a passthrough that a
-                # bare dict would otherwise serialize as a misleading 200.
+                # HTTPException / abort()). It may return an
+                # AppAttestedPresence to forward the consumed ceremony's fact
+                # to the hosted service. Any OTHER non-None return is a
+                # contract violation -> fail closed (500), never a passthrough
+                # that a bare dict would otherwise serialize as a misleading 200.
                 presence_result = aa._require_token_mint_presence(
                     request=request,
                     current_user=current_user,
                     body=data,
                 )
-                if presence_result is not None:
+                if isinstance(presence_result, AppAttestedPresence):
+                    presence_fact = presence_result
+                elif presence_result is not None:
                     return jsonify({
                         "error": "presence_hook_misconfigured",
-                        "error_description": "The token-mint presence hook must raise to deny; it must not return a value.",
+                        "error_description": "The token-mint presence hook must raise to deny; it may only return None or an AppAttestedPresence.",
                     }), 500
 
             # duration_seconds is tri-state: key absent → hosted default (30
@@ -438,6 +444,10 @@ class AgentAdmitFlask:
             # omit entirely when absent.
             if user_intent is not None:
                 payload["user_intent"] = user_intent
+            # App-attested presence: the hook verified and consumed the app's
+            # own ceremony attestation and returned the fact.
+            if presence_fact is not None:
+                payload["presence"] = presence_fact.to_wire()
 
             try:
                 resp = httpx.post(
@@ -474,6 +484,9 @@ class AgentAdmitFlask:
                     # User-declared intent is persisted locally for the same
                     # reason.
                     "user_intent": user_intent,
+                    # App-attested presence fact is persisted locally so GET
+                    # /connections can surface it.
+                    "presence": presence_fact.to_wire() if presence_fact is not None else None,
                     "duration_seconds": data.get("duration_seconds") if "duration_seconds" in data else None,
                     "status": "active",
                 })

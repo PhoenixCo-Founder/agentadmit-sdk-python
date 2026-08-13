@@ -28,6 +28,7 @@ from agentadmit.auth import (
 )
 from agentadmit.config import get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.models import (
+    AppAttestedPresence,
     GenerateTokenRequest,
     GenerateTokenResponse,
     RevokeRequest,
@@ -87,7 +88,7 @@ def _run_token_mint_presence_hook(
     request: Request,
     current_user: dict,
     body: GenerateTokenRequest,
-):
+) -> Optional[AppAttestedPresence]:
     """Run the app's token-mint presence hook when configured.
 
     The hook is intentionally app-owned: WebAuthn/passkey ceremonies are
@@ -95,25 +96,32 @@ def _run_token_mint_presence_hook(
     consumes a fresh, purpose-bound attestation before token minting.
 
     Contract: the hook DENIES by RAISING (e.g. HTTPException). Returning None
-    allows the mint. A non-None return is a contract violation and FAILS
-    CLOSED (500, mint not reached) so a malformed hook (e.g. one that returns
-    a plain dict) can never produce a misleading success response.
+    allows the mint. Returning an ``AppAttestedPresence`` allows the mint AND
+    forwards the ceremony fact to the hosted service (stored provenance-marked
+    ``app:<method>``), so introspection, the ledger, and the evidence API stop
+    reporting ``presence.verified=false`` about a ceremony that really
+    happened. Any OTHER return value is a contract violation and FAILS CLOSED
+    (500, mint not reached) so a malformed hook (e.g. one that returns a plain
+    dict) can never produce a misleading success response.
     """
     if hook is None:
-        return
+        return None
 
     result = hook(request=request, current_user=current_user, body=body)
-    if result is not None:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "presence_hook_misconfigured",
-                "error_description": (
-                    "The token-mint presence hook must raise to deny; it must "
-                    "not return a value."
-                ),
-            },
-        )
+    if result is None:
+        return None
+    if isinstance(result, AppAttestedPresence):
+        return result
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "error": "presence_hook_misconfigured",
+            "error_description": (
+                "The token-mint presence hook must raise to deny; it may "
+                "only return None or an AppAttestedPresence."
+            ),
+        },
+    )
 
 
 def create_agentadmit_router(
@@ -283,8 +291,9 @@ def create_agentadmit_router(
 
         # Presence gate (consume-before-mint): runs after scope + cap
         # validation so a rejected request never spends an attestation. The
-        # hook raises to deny.
-        _run_token_mint_presence_hook(
+        # hook raises to deny; it may return an AppAttestedPresence to
+        # forward the consumed ceremony's fact to the hosted service.
+        presence_fact = _run_token_mint_presence_hook(
             require_token_mint_presence,
             request=request,
             current_user=current_user,
@@ -309,6 +318,11 @@ def create_agentadmit_router(
         # entirely when absent (the hosted service rejects explicit JSON nulls).
         if body.user_intent is not None:
             payload["user_intent"] = body.user_intent
+        # App-attested presence: the hook verified and consumed the app's own
+        # ceremony attestation and returned the fact. Forwarded typed —
+        # verified/uv literal true, verified_at offset-aware by construction.
+        if presence_fact is not None:
+            payload["presence"] = presence_fact.to_wire()
 
         resp = _call_hosted_service("POST", f"/api/v1/apps/{config.app_id}/token", json=payload)
 
@@ -335,6 +349,9 @@ def create_agentadmit_router(
             "purpose": body.purpose,
             # User-declared intent is persisted locally for the same reason.
             "user_intent": body.user_intent,
+            # App-attested presence fact is persisted locally so GET
+            # /connections can surface it. None when no fact was forwarded.
+            "presence": presence_fact.to_wire() if presence_fact is not None else None,
             "duration_seconds": body.duration_seconds if "duration_seconds" in body.model_fields_set else None,
             "status": "active",
         })
@@ -518,6 +535,10 @@ def create_agentadmit_router(
                 "label": agent_label,  # alias for frontend compatibility
                 "purpose": c.get("purpose"),
                 "user_intent": c.get("user_intent"),
+                # App-attested presence fact (explicit ride: this serializer
+                # is a field whitelist — new stored fields do NOT pass through
+                # on their own).
+                "presence": c.get("presence"),
                 "agent_id": c.get("agent_id"),
                 "status": c.get("status"),
                 "created_at": _serialize_dt(c.get("created_at")),

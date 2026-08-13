@@ -269,8 +269,56 @@ configured, existing apps keep the previous behavior.
 **Deny by raising.** The hook must `raise` (an `HTTPException` in FastAPI,
 `abort()` / an exception in Flask/Django) to deny, and must *verify and
 consume* the attestation single-use (checking alone lets it be replayed).
-Returning `None` allows the mint; any other return value fails closed with a
-`500` so a malformed hook can never emit a misleading success response.
+Returning `None` allows the mint; returning an `AppAttestedPresence` allows
+the mint and forwards the ceremony fact (below); any other return value fails
+closed with a `500` so a malformed hook can never emit a misleading success
+response.
+
+### App-Attested Presence (forward the ceremony fact)
+
+Your ceremony is origin-bound, so AgentAdmit never witnesses it: by default
+the hosted service reports `presence.verified: false` for connections your
+hook gated, even though a real passkey ceremony happened. To close that gap,
+return an `AppAttestedPresence` from the hook after verifying and consuming
+your attestation:
+
+```python
+from agentadmit import AppAttestedPresence
+
+def require_token_mint_presence(*, request, current_user, body):
+    attestation = verify_and_consume_passkey_attestation(
+        user_id=current_user["user_id"],
+        attestation_id=body.presence_attestation_id,
+        purpose="token_mint",
+    )
+    if attestation is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "presence_attestation_required"},
+        )
+    return AppAttestedPresence(
+        method="my_webauthn",              # lowercase alphanumeric/underscore
+        verified_at=attestation.created_at,  # MUST be timezone-aware
+    )
+```
+
+The SDK forwards it to the hosted mint as
+`presence: {verified: true, uv: true, method, verified_at}`. The hosted
+service validates freshness (10-minute window, 60 s future clock-skew slack)
+and stores the method provenance-marked `app:<method>` so app-attested facts
+stay distinct from ceremonies AgentAdmit witnessed itself. Introspection, the
+grant-event ledger, and the evidence API then carry `presence.verified: true`
+for the connection, and the local record behind `GET /connections` carries
+the same `presence` object.
+
+Honesty ceiling: this is *your app's attestation*, recorded and
+provenance-marked. It is not witnessed by AgentAdmit and not independently
+verifiable. Only construct one for a ceremony that verified the user with UV
+(biometric or PIN user verification); `verified`/`uv` are literal `true`; a
+ceremony without UV carries no presence fact, so return `None` instead.
+`verified_at` must be timezone-aware (`datetime.now(timezone.utc)`, not
+`datetime.utcnow()`); naive timestamps are rejected at construction because
+they serialize without an offset and the hosted mint rejects them.
 
 ## Declared Purpose
 
