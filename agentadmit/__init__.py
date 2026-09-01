@@ -54,6 +54,7 @@ from agentadmit.exceptions import (
     ConnectionLimitError,
     ConfigurationError,
     WebhookSignatureError,
+    VerifyRefusedError,
 )
 
 __all__ = [
@@ -102,4 +103,5 @@ __all__ = [
     "ConnectionLimitError",
     "ConfigurationError",
     "WebhookSignatureError",
+    "VerifyRefusedError",
 ]

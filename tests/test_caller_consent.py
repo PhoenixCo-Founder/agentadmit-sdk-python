@@ -80,7 +80,7 @@ def test_classify_honors_non_agent_classifier():
 # --- external_agent path ---------------------------------------------------
 
 def test_external_allows_with_scope(monkeypatch):
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: dict(AGENT_CTX))
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX))
     dep = caller_consent(required_scope="read:things")
     ctx = dep(request=_req(), credentials=_creds("ag_at_tok"))
     assert ctx["caller_class"] == "external_agent"
@@ -88,7 +88,7 @@ def test_external_allows_with_scope(monkeypatch):
 
 
 def test_external_denies_missing_scope(monkeypatch):
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: dict(AGENT_CTX))
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX))
     dep = caller_consent(required_scope="write:things")
     with pytest.raises(HTTPException) as ei:
         dep(request=_req(), credentials=_creds("ag_at_tok"))
@@ -98,7 +98,7 @@ def test_external_denies_missing_scope(monkeypatch):
 
 def test_external_denies_when_consent_denied(monkeypatch):
     ctx = dict(AGENT_CTX, consent={"caller_class": "external_agent", "granted": False, "source": "setting"})
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: ctx)
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: ctx)
     dep = caller_consent()
     with pytest.raises(HTTPException) as ei:
         dep(request=_req(), credentials=_creds("ag_at_tok"))
@@ -112,7 +112,7 @@ def test_external_consent_checked_before_scope(monkeypatch):
     learn scope state (insufficient_scope + granted_scopes) when its class
     consent is denied."""
     ctx = dict(AGENT_CTX, consent={"caller_class": "external_agent", "granted": False, "source": "setting"})
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: ctx)
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: ctx)
     dep = caller_consent(required_scope="write:things")  # scope ALSO missing
     with pytest.raises(HTTPException) as ei:
         dep(request=_req(), credentials=_creds("ag_at_tok"))
@@ -122,7 +122,7 @@ def test_external_consent_checked_before_scope(monkeypatch):
 
 def test_external_absent_verdict_resolved_via_ledger_allow(monkeypatch):
     """Absent verdict is never a grant: the SDK resolves it via check_consent."""
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: dict(AGENT_CTX_NO_VERDICT))
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX_NO_VERDICT))
     calls = []
     def ledger(owner, cls, sg=None):
         calls.append((owner, cls, sg))
@@ -135,7 +135,7 @@ def test_external_absent_verdict_resolved_via_ledger_allow(monkeypatch):
 
 
 def test_external_absent_verdict_ledger_denies(monkeypatch):
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: dict(AGENT_CTX_NO_VERDICT))
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX_NO_VERDICT))
     monkeypatch.setattr(cc_mod, "check_consent", lambda o, c, sg=None: {"caller_class": "external_agent", "granted": False, "source": "setting"})
     with pytest.raises(HTTPException) as ei:
         caller_consent()(request=_req(), credentials=_creds("ag_at_tok"))
@@ -144,7 +144,7 @@ def test_external_absent_verdict_ledger_denies(monkeypatch):
 
 
 def test_external_absent_verdict_ledger_error_fails_closed(monkeypatch):
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: dict(AGENT_CTX_NO_VERDICT))
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX_NO_VERDICT))
     def boom(o, c, sg=None):
         raise RuntimeError("ledger unreachable")
     monkeypatch.setattr(cc_mod, "check_consent", boom)
@@ -157,7 +157,7 @@ def test_external_absent_verdict_ledger_error_fails_closed(monkeypatch):
 def test_external_malformed_verdict_treated_as_absent(monkeypatch):
     """granted must be a real boolean — a truthy string is not a verdict."""
     ctx = dict(AGENT_CTX, consent={"caller_class": "external_agent", "granted": "yes", "source": "setting"})
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: ctx)
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: ctx)
     monkeypatch.setattr(cc_mod, "check_consent", lambda o, c, sg=None: {"caller_class": "external_agent", "granted": False, "source": "setting"})
     with pytest.raises(HTTPException) as ei:
         caller_consent()(request=_req(), credentials=_creds("ag_at_tok"))
@@ -168,7 +168,7 @@ def test_external_absent_verdict_no_owner_fails_closed(monkeypatch):
     """No verdict AND no resolvable owner (deleted/stub user) — cannot resolve,
     so deny with 503 rather than allow."""
     ctx = {"user": {}, "scopes": ["read:things"]}
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds: ctx)
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: ctx)
     with pytest.raises(HTTPException) as ei:
         caller_consent()(request=_req(), credentials=_creds("ag_at_tok"))
     assert ei.value.status_code == 503

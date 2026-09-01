@@ -355,3 +355,34 @@ def test_refusal_helper_insufficient_scope_shape():
         "required_scope": "read:orders",
         "granted_scopes": ["a"],
     }
+
+
+# ---------------------------------------------------------------------------
+# caller_consent path: endpoint/method ride, scope_used never sent pre-consent
+# ---------------------------------------------------------------------------
+
+def test_caller_consent_sends_endpoint_method_but_never_scope(captured, monkeypatch):
+    from agentadmit import callerconsent as cc
+
+    calls, fake = captured
+    fake.payload = dict(
+        ACTIVE_OK,
+        consent={
+            "caller_class": "external_agent",
+            "granted": True,
+            "source": "app_default",
+        },
+    )
+
+    app = FastAPI()
+
+    @app.get("/api/records")
+    def records(ctx=Depends(cc.caller_consent(required_scope="read:orders"))):
+        return {"ok": True}
+
+    client = TestClient(app)
+    r = client.get("/api/records?owner=secret", headers={"Authorization": "Bearer ag_at_tok"})
+    assert r.status_code == 200
+    assert calls[-1]["endpoint"] == "/api/records"
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["scope_used"] is None, "consent path must not declare scope pre-consent"
