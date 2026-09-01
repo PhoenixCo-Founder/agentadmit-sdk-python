@@ -26,11 +26,11 @@ from typing import Callable, Optional
 import httpx
 from flask import Blueprint, Flask, g, jsonify, request
 
-from agentadmit.auth import _introspect_with_retry, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage, StorageBackend
-from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError
+from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError, VerifyRefusedError
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +97,23 @@ class AgentAdmitFlask:
             return auth[7:]
         return None
 
-    def _validate_agent_token(self, token: str) -> dict:
-        """Validate an ag_at_ token via mandatory introspection."""
+    def _validate_agent_token(self, token: str, scope_used: Optional[str] = None) -> dict:
+        """Validate an ag_at_ token via mandatory introspection.
+
+        ``scope_used`` (1.10.0) is the scope the calling decorator enforces;
+        it rides the verify call as audit telemetry along with the inbound
+        endpoint (path only, query stripped) and method.
+        """
         if not token.startswith(self.config.token_prefix_access):
             raise ValueError("Not an AgentAdmit access token")
+
+        try:
+            endpoint = (request.path or None) if request else None
+            method = ((request.method or "").upper() or None) if request else None
+        except RuntimeError:  # outside a request context
+            endpoint, method = None, None
+        endpoint = endpoint[:500] if endpoint else None
+        method = method[:20] if method else None
 
         # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service,
         # using the shared retry client (429 backoff, capped Retry-After,
@@ -113,6 +126,9 @@ class AgentAdmitFlask:
                 token,
                 self.config.app_id,
                 self.config.api_key,
+                scope_used=scope_used,
+                endpoint=endpoint,
+                method=method,
             )
         except RateLimitError:
             raise
@@ -134,6 +150,15 @@ class AgentAdmitFlask:
         if data.get("active") is not True:
             reason = data.get("error", "invalid_token")
             raise ValueError(f"Token is not active: {reason}")
+
+        # Active-but-refused (1.10.0, fail-closed): an error field on an
+        # active response is a per-call denial (insufficient_scope,
+        # bound_exceeded, or a future refusal class) — surface 403, never
+        # pass through. Checked before field validation: refusal responses
+        # deliberately omit identity fields.
+        refusal = _active_refusal_payload(data, scope_used)
+        if refusal is not None:
+            raise VerifyRefusedError(refusal["error"], refusal)
 
         # M5: Validate field types to block NoSQL-injection via crafted responses.
         scopes = data.get("scopes", [])
@@ -218,7 +243,7 @@ class AgentAdmitFlask:
                     return jsonify({"error": "invalid_token", "error_description": "AgentAdmit token required"}), 401
 
                 try:
-                    ctx = self._validate_agent_token(token)
+                    ctx = self._validate_agent_token(token, scope_used=scope)
                 except RateLimitError:
                     return jsonify({
                         "error": "rate_limited",
@@ -226,6 +251,9 @@ class AgentAdmitFlask:
                     }), 502
                 except IntrospectionUnavailableError as e:
                     return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
+                except VerifyRefusedError as e:
+                    # Active-but-refused: hosted service denied THIS call.
+                    return jsonify(e.payload), 403
                 except Exception as e:
                     return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
 
@@ -266,6 +294,8 @@ class AgentAdmitFlask:
                     }), 502
                 except IntrospectionUnavailableError as e:
                     return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
+                except VerifyRefusedError as e:
+                    return jsonify(e.payload), 403
                 except Exception as e:
                     return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
 
@@ -290,7 +320,7 @@ class AgentAdmitFlask:
                     return f(*args, **kwargs)
 
                 try:
-                    ctx = self._validate_agent_token(token)
+                    ctx = self._validate_agent_token(token, scope_used=scope)
                 except RateLimitError:
                     return jsonify({
                         "error": "rate_limited",
@@ -298,6 +328,8 @@ class AgentAdmitFlask:
                     }), 502
                 except IntrospectionUnavailableError as e:
                     return jsonify({"error": "service_unavailable", "error_description": str(e)}), 502
+                except VerifyRefusedError as e:
+                    return jsonify(e.payload), 403
                 except Exception as e:
                     return jsonify({"error": "invalid_token", "error_description": str(e)}), 401
 

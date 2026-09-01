@@ -43,9 +43,9 @@ from django.http import JsonResponse
 from django.urls import path
 from django.conf import settings
 
-from agentadmit.auth import _introspect_with_retry, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
-from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError
+from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage
 
@@ -111,11 +111,21 @@ def _get_bearer_token(request) -> Optional[str]:
     return None
 
 
-def _validate_agent_token(token: str) -> dict:
-    """Validate an ag_at_ token via mandatory introspection."""
+def _validate_agent_token(token: str, request=None, scope_used: Optional[str] = None) -> dict:
+    """Validate an ag_at_ token via mandatory introspection.
+
+    ``scope_used`` (1.10.0) is the scope the calling decorator enforces;
+    it rides the verify call as audit telemetry along with the inbound
+    endpoint (path only, query stripped) and method from ``request``.
+    """
     _init()
     if not token.startswith(_config.token_prefix_access):
         raise ValueError("Not an AgentAdmit token")
+
+    endpoint = getattr(request, "path", None) if request is not None else None
+    method = (getattr(request, "method", "") or "").upper() or None if request is not None else None
+    endpoint = endpoint[:500] if endpoint else None
+    method = method[:20] if method else None
 
     # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service,
     # using the shared retry client (429 backoff, capped Retry-After, 120s
@@ -128,6 +138,9 @@ def _validate_agent_token(token: str) -> dict:
             token,
             _config.app_id,
             _config.api_key,
+            scope_used=scope_used,
+            endpoint=endpoint,
+            method=method,
         )
     except RateLimitError:
         raise
@@ -149,6 +162,14 @@ def _validate_agent_token(token: str) -> dict:
     if data.get("active") is not True:
         reason = data.get("error", "invalid_token")
         raise ValueError(f"Token is not active: {reason}")
+
+    # Active-but-refused (1.10.0, fail-closed): an error field on an active
+    # response is a per-call denial (insufficient_scope, bound_exceeded, or
+    # a future refusal class) — surface 403, never pass through. Checked
+    # before field validation: refusal responses omit identity fields.
+    refusal = _active_refusal_payload(data, scope_used)
+    if refusal is not None:
+        raise VerifyRefusedError(refusal["error"], refusal)
 
     # M5: Validate field types to block NoSQL-injection via crafted responses.
     scopes = data.get("scopes", [])
@@ -246,7 +267,7 @@ class AgentAdmitMiddleware:
             # anonymous request would let a forged/revoked token reach views
             # that use `agentadmit_user is None` to mean "no agent involved".
             try:
-                ctx = _validate_agent_token(token)
+                ctx = _validate_agent_token(token, request=request)
                 request.agentadmit_user = {"auth_type": "agent", **ctx}
             except RateLimitError:
                 return JsonResponse({
@@ -255,6 +276,8 @@ class AgentAdmitMiddleware:
                 }, status=502)
             except IntrospectionUnavailableError as e:
                 return JsonResponse({"error": "service_unavailable", "error_description": str(e)}, status=502)
+            except VerifyRefusedError as e:
+                return JsonResponse(e.payload, status=403)
             except Exception as e:
                 return JsonResponse({"error": "invalid_token", "error_description": str(e)}, status=401)
 
@@ -276,7 +299,7 @@ def require_scope(scope: str):
                 return JsonResponse({"error": "invalid_token"}, status=401)
 
             try:
-                ctx = _validate_agent_token(token)
+                ctx = _validate_agent_token(token, request=request, scope_used=scope)
             except RateLimitError:
                 return JsonResponse({
                     "error": "rate_limited",
@@ -284,6 +307,8 @@ def require_scope(scope: str):
                 }, status=502)
             except IntrospectionUnavailableError as e:
                 return JsonResponse({"error": "service_unavailable", "error_description": str(e)}, status=502)
+            except VerifyRefusedError as e:
+                return JsonResponse(e.payload, status=403)
             except Exception as e:
                 return JsonResponse({"error": "invalid_token", "error_description": str(e)}, status=401)
 
@@ -314,7 +339,7 @@ def require_presence():
                 return JsonResponse({"error": "invalid_token"}, status=401)
 
             try:
-                ctx = _validate_agent_token(token)
+                ctx = _validate_agent_token(token, request=request)
             except RateLimitError:
                 return JsonResponse({
                     "error": "rate_limited",
@@ -322,6 +347,8 @@ def require_presence():
                 }, status=502)
             except IntrospectionUnavailableError as e:
                 return JsonResponse({"error": "service_unavailable", "error_description": str(e)}, status=502)
+            except VerifyRefusedError as e:
+                return JsonResponse(e.payload, status=403)
             except Exception as e:
                 return JsonResponse({"error": "invalid_token", "error_description": str(e)}, status=401)
 
@@ -348,7 +375,7 @@ def require_scope_if_agent(scope: str):
                 return view_func(request, *args, **kwargs)
 
             try:
-                ctx = _validate_agent_token(token)
+                ctx = _validate_agent_token(token, request=request, scope_used=scope)
             except RateLimitError:
                 return JsonResponse({
                     "error": "rate_limited",
@@ -356,6 +383,8 @@ def require_scope_if_agent(scope: str):
                 }, status=502)
             except IntrospectionUnavailableError as e:
                 return JsonResponse({"error": "service_unavailable", "error_description": str(e)}, status=502)
+            except VerifyRefusedError as e:
+                return JsonResponse(e.payload, status=403)
             except Exception as e:
                 return JsonResponse({"error": "invalid_token", "error_description": str(e)}, status=401)
 
