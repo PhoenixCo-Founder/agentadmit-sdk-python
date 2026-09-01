@@ -358,10 +358,10 @@ def test_refusal_helper_insufficient_scope_shape():
 
 
 # ---------------------------------------------------------------------------
-# caller_consent path: endpoint/method ride, scope_used never sent pre-consent
+# caller_consent path: hosted consent-first ordering + exact telemetry
 # ---------------------------------------------------------------------------
 
-def test_caller_consent_sends_endpoint_method_but_never_scope(captured, monkeypatch):
+def test_caller_consent_sends_scope_endpoint_method_with_consent_first(captured, monkeypatch):
     from agentadmit import callerconsent as cc
 
     calls, fake = captured
@@ -385,4 +385,29 @@ def test_caller_consent_sends_endpoint_method_but_never_scope(captured, monkeypa
     assert r.status_code == 200
     assert calls[-1]["endpoint"] == "/api/records"
     assert calls[-1]["method"] == "GET"
-    assert calls[-1]["scope_used"] is None, "consent path must not declare scope pre-consent"
+    assert calls[-1]["scope_used"] == "read:orders"
+    assert calls[-1]["consent_first"] is True
+
+
+def test_wire_payload_carries_consent_first_only_when_requested():
+    seen = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        seen.update(json)
+        return httpx.Response(200, json=dict(ACTIVE_OK))
+
+    orig = auth_mod.httpx.post
+    auth_mod.httpx.post = fake_post
+    try:
+        auth_mod._introspect_with_retry(
+            "https://agentadmit.example/api/v1/verify",
+            "ag_at_tok",
+            "app",
+            "key",
+            scope_used="read:orders",
+            consent_first=True,
+        )
+    finally:
+        auth_mod.httpx.post = orig
+    assert seen["scope_used"] == "read:orders"
+    assert seen["consent_first"] is True

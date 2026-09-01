@@ -81,6 +81,7 @@ def _introspect_with_retry(
     scope_used: Optional[str] = None,
     endpoint: Optional[str] = None,
     method: Optional[str] = None,
+    consent_first: bool = False,
 ) -> "httpx.Response":
     """
     POST to the AgentAdmit introspection endpoint with automatic 429 retry.
@@ -111,6 +112,8 @@ def _introspect_with_retry(
         payload["endpoint"] = endpoint
     if method:
         payload["method"] = method
+    if consent_first:
+        payload["consent_first"] = True
 
     delay = 1.0  # seconds — initial backoff
     waited = 0.0  # cumulative wait across retries
@@ -282,6 +285,8 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
 def get_agentadmit_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     request: Request = None,
+    scope_used: Optional[str] = None,
+    consent_first: bool = False,
 ) -> dict:
     """
     Validates an AgentAdmit access token (ag_at_ prefixed RS256 JWT).
@@ -302,21 +307,28 @@ def get_agentadmit_user(
             "scopes": <list[str]>,
         }
     """
-    return _authenticate_agent(credentials, request=request)
+    return _authenticate_agent(
+        credentials,
+        request=request,
+        scope_used=scope_used,
+        consent_first=consent_first,
+    )
 
 
 def _authenticate_agent(
     credentials: Optional[HTTPAuthorizationCredentials],
     request: Request = None,
     scope_used: Optional[str] = None,
+    consent_first: bool = False,
 ) -> dict:
     """Shared implementation behind get_agentadmit_user and require_scope*.
 
     ``scope_used`` is the single scope the calling dependency enforces for
-    this request; it rides the verify call as audit telemetry. ``request``
-    supplies endpoint/method telemetry and hosts a per-request introspection
-    cache so stacking scope dependencies on one route still bills ONE verify
-    call (matching FastAPI's dependency cache behavior before 1.10.0).
+    this request; it rides the verify call as audit telemetry. Custom
+    caller-identity gates also set ``consent_first`` so the hosted service
+    resolves consent before scope without requiring a second verify call.
+    ``request`` supplies endpoint/method telemetry and hosts a per-request
+    introspection cache.
     """
     config = get_config()
     storage = _get_storage()
@@ -340,11 +352,12 @@ def _authenticate_agent(
 
     # Per-request introspection cache: two scope dependencies on one route
     # must not double-verify (and double-bill). Keyed by token.
+    cache_key = (token, scope_used, bool(consent_first))
     if request is not None:
         try:
             cache = getattr(request.state, "_agentadmit_ctx_cache", None)
-            if isinstance(cache, dict) and token in cache:
-                return cache[token]
+            if isinstance(cache, dict) and cache_key in cache:
+                return cache[cache_key]
         except Exception:
             pass
 
@@ -365,6 +378,7 @@ def _authenticate_agent(
             scope_used=scope_used,
             endpoint=endpoint,
             method=http_method,
+            consent_first=consent_first,
         )
     except RateLimitError:
         raise  # Let RateLimitError propagate as-is for caller to handle
@@ -495,7 +509,13 @@ def _authenticate_agent(
             if not isinstance(cache, dict):
                 cache = {}
                 request.state._agentadmit_ctx_cache = cache
-            cache[token] = context
+            cache[cache_key] = context
+            # A scope-aware verification contains everything a later generic
+            # dependency needs. The reverse is not true: a generic verify did
+            # not declare the exercised scope and must never satisfy a later
+            # scope-aware dependency from cache.
+            if scope_used is not None:
+                cache.setdefault((token, None, False), context)
         except Exception:
             pass
 

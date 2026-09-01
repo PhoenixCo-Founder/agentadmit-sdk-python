@@ -422,6 +422,12 @@ use collect these automatically. Calls verified without a scope-enforcing entry
 point (for example `get_agentadmit_user` alone) still send endpoint and method,
 and the hosted audit log honestly records that no exercised scope was declared.
 
+`caller_consent(required_scope=...)` also reports the exact scope in the same
+round trip. It sets the hosted `consent_first` guard so a denied caller class
+cannot learn scope state. Custom consent gates can use the equivalent public
+form: `get_agentadmit_user(credentials, request=request,
+scope_used="read:orders", consent_first=True)`.
+
 The SDK also fails closed on per-call refusals: when the hosted service answers
 that the token is valid but THIS call is refused (`insufficient_scope`,
 `bound_exceeded` when a user-set usage ceiling is reached, or any future refusal
