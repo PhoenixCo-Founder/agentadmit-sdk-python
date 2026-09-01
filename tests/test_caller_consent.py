@@ -80,11 +80,17 @@ def test_classify_honors_non_agent_classifier():
 # --- external_agent path ---------------------------------------------------
 
 def test_external_allows_with_scope(monkeypatch):
-    monkeypatch.setattr(cc_mod, "get_agentadmit_user", lambda creds, **kw: dict(AGENT_CTX))
+    seen = {}
+    def verify(creds, **kw):
+        seen.update(kw)
+        return dict(AGENT_CTX)
+    monkeypatch.setattr(cc_mod, "get_agentadmit_user", verify)
     dep = caller_consent(required_scope="read:things")
     ctx = dep(request=_req(), credentials=_creds("ag_at_tok"))
     assert ctx["caller_class"] == "external_agent"
     assert ctx["auth_type"] == "agent"
+    assert seen["scope_used"] == "read:things"
+    assert seen["consent_first"] is True
 
 
 def test_external_denies_missing_scope(monkeypatch):

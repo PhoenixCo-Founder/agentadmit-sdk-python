@@ -112,13 +112,16 @@ def caller_consent(
 
         # ── external_agent: hosted introspection carries the verdict + scopes ──
         if caller_class == "external_agent":
-            # Endpoint/method telemetry rides the verify call; scope_used is
-            # deliberately NOT sent from this dependency — declaring it would
-            # let the hosted scope check answer before this gate's
-            # consent-first ordering, leaking scope state to callers whose
-            # class the owner denied. The scope check stays local, below,
-            # after consent.
-            agent_ctx = get_agentadmit_user(credentials, request=request)
+            # One hosted round trip now carries the declared scope AND asks
+            # the service to resolve consent first. A denied class therefore
+            # cannot learn scope state, while allowed calls produce exact
+            # per-call scope/endpoint/method audit telemetry.
+            agent_ctx = get_agentadmit_user(
+                credentials,
+                request=request,
+                scope_used=required_scope,
+                consent_first=True,
+            )
 
             # Consent first (Patent FIG. 3: the class consent decision precedes
             # scope evaluation). Checking scope first leaked granted-scope state
