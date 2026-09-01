@@ -27,6 +27,7 @@ from agentadmit.exceptions import (
     ConnectionLimitError,
     ConfigurationError,
     RateLimitError,
+    VerifyRefusedError,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ def _introspect_with_retry(
     api_key: str,
     timeout: int = 5,
     max_retries: int = 3,
+    scope_used: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    method: Optional[str] = None,
 ) -> "httpx.Response":
     """
     POST to the AgentAdmit introspection endpoint with automatic 429 retry.
@@ -97,7 +101,16 @@ def _introspect_with_retry(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    # Per-call audit telemetry (1.10.0): the exercised scope and the inbound
+    # endpoint/method ride the verify call so the hosted audit log records
+    # what THIS call did — omitted entirely when unknown, never null.
     payload = {"token": token}
+    if scope_used:
+        payload["scope_used"] = scope_used
+    if endpoint:
+        payload["endpoint"] = endpoint
+    if method:
+        payload["method"] = method
 
     delay = 1.0  # seconds — initial backoff
     waited = 0.0  # cumulative wait across retries
@@ -198,11 +211,77 @@ def _parse_float_header(response: "httpx.Response", name: str) -> Optional[float
 
 
 # ---------------------------------------------------------------------------
+# Per-call audit telemetry helpers (1.10.0)
+# ---------------------------------------------------------------------------
+
+# Hosted BodySchema caps (verify route): endpoint ≤500, method ≤20.
+_ENDPOINT_MAX = 500
+_METHOD_MAX = 20
+
+
+def _request_telemetry(request) -> tuple:
+    """(endpoint, method) from an inbound request, or (None, None).
+
+    Path only — the query string is stripped (it can carry PII the audit
+    log must never receive). Values are capped to the hosted schema limits.
+    """
+    if request is None:
+        return None, None
+    try:
+        endpoint = request.url.path or None
+        method = (request.method or "").upper() or None
+    except Exception:
+        return None, None
+    return (
+        endpoint[:_ENDPOINT_MAX] if endpoint else None,
+        method[:_METHOD_MAX] if method else None,
+    )
+
+
+def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[dict]:
+    """403 body for an active-but-refused introspection response, else None.
+
+    An ``error`` field on an ``active: true`` response is a per-call DENIAL
+    (insufficient_scope, bound_exceeded, or a future refusal class) — never
+    a pass-through. Shared by the FastAPI, Flask, and Django paths.
+    """
+    error = data.get("error")
+    if not isinstance(error, str) or not error:
+        return None
+    if error == "insufficient_scope":
+        payload = {
+            "error": "insufficient_scope",
+            "required_scope": scope_used,
+            "granted_scopes": data.get("granted_scopes") or data.get("scopes") or [],
+        }
+        return payload
+    if error == "bound_exceeded":
+        payload = {
+            "error": "bound_exceeded",
+            "error_description": data.get(
+                "error_description",
+                "A usage ceiling the user set for this connection has been reached.",
+            ),
+        }
+        if isinstance(data.get("bound"), dict):
+            payload["bound"] = data["bound"]
+        if isinstance(data.get("renewal"), str):
+            payload["renewal"] = data["renewal"]
+        return payload
+    # Unknown refusal class: fail closed (forward-compatible).
+    return {
+        "error": error,
+        "error_description": "Call refused by the authorization service.",
+    }
+
+
+# ---------------------------------------------------------------------------
 # get_agentadmit_user — primary agent token validation
 # ---------------------------------------------------------------------------
 
 def get_agentadmit_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request = None,
 ) -> dict:
     """
     Validates an AgentAdmit access token (ag_at_ prefixed RS256 JWT).
@@ -222,6 +301,22 @@ def get_agentadmit_user(
             "connection": <connection document>,
             "scopes": <list[str]>,
         }
+    """
+    return _authenticate_agent(credentials, request=request)
+
+
+def _authenticate_agent(
+    credentials: Optional[HTTPAuthorizationCredentials],
+    request: Request = None,
+    scope_used: Optional[str] = None,
+) -> dict:
+    """Shared implementation behind get_agentadmit_user and require_scope*.
+
+    ``scope_used`` is the single scope the calling dependency enforces for
+    this request; it rides the verify call as audit telemetry. ``request``
+    supplies endpoint/method telemetry and hosts a per-request introspection
+    cache so stacking scope dependencies on one route still bills ONE verify
+    call (matching FastAPI's dependency cache behavior before 1.10.0).
     """
     config = get_config()
     storage = _get_storage()
@@ -243,10 +338,21 @@ def get_agentadmit_user(
 
     raw_token = token[len(config.token_prefix_access):]
 
+    # Per-request introspection cache: two scope dependencies on one route
+    # must not double-verify (and double-bill). Keyed by token.
+    if request is not None:
+        try:
+            cache = getattr(request.state, "_agentadmit_ctx_cache", None)
+            if isinstance(cache, dict) and token in cache:
+                return cache[token]
+        except Exception:
+            pass
+
     # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service
     # No local JWT decode. Every verification call goes through AgentAdmit.
     # This is how we meter usage, seed the marketplace, and enforce billing.
 
+    endpoint, http_method = _request_telemetry(request)
     max_retries = getattr(config, "max_retries", 3)
     try:
         verify_response = _introspect_with_retry(
@@ -256,6 +362,9 @@ def get_agentadmit_user(
             api_key=config.api_key,
             timeout=5,
             max_retries=max_retries,
+            scope_used=scope_used,
+            endpoint=endpoint,
+            method=http_method,
         )
     except RateLimitError:
         raise  # Let RateLimitError propagate as-is for caller to handle
@@ -289,6 +398,15 @@ def get_agentadmit_user(
             status_code=403 if reason == "insufficient_scope" else 401,
             detail={"error": reason, "error_description": f"Token is not active: {reason}"},
         )
+
+    # Active-but-refused (1.10.0, fail-closed): an error field on an active
+    # response means the hosted service refused THIS call (insufficient_scope,
+    # bound_exceeded, or a future refusal class). The token stays valid; the
+    # call is denied 403. Checked before field validation — refusal responses
+    # deliberately omit identity fields.
+    refusal = _active_refusal_payload(introspection_data, scope_used)
+    if refusal is not None:
+        raise HTTPException(status_code=403, detail=refusal)
 
     # --- M5: Validate introspection response field types ---
     # A malicious introspection response (e.g. {"active":true,"user_id":{"$ne":null}})
@@ -371,6 +489,16 @@ def get_agentadmit_user(
     if isinstance(user_intent, str):
         context["user_intent"] = user_intent
 
+    if request is not None:
+        try:
+            cache = getattr(request.state, "_agentadmit_ctx_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                request.state._agentadmit_ctx_cache = cache
+            cache[token] = context
+        except Exception:
+            pass
+
     return context
 
 
@@ -408,8 +536,13 @@ def require_scope(scope: str):
             ...
     """
     def scope_checker(
-        agent_ctx: dict = Depends(get_agentadmit_user),
+        credentials: HTTPAuthorizationCredentials = Depends(security),
+        request: Request = None,
     ) -> dict:
+        # The verify call carries scope_used=scope (1.10.0 telemetry) — the
+        # hosted service records the exercised scope and refuses ungranted
+        # ones itself; the local check below stays as defense in depth.
+        agent_ctx = _authenticate_agent(credentials, request=request, scope_used=scope)
         granted_scopes = agent_ctx.get("scopes", [])
 
         if scope not in granted_scopes:
@@ -449,7 +582,7 @@ def require_presence():
             ...
     """
     def presence_checker(
-        agent_ctx: dict = Depends(get_agentadmit_user),
+        agent_ctx: dict = Depends(get_agentadmit_user),  # endpoint/method telemetry rides get_agentadmit_user's request param
     ) -> dict:
         if not presence_verified(agent_ctx):
             raise HTTPException(
@@ -489,6 +622,7 @@ def require_scope_if_agent(scope: str):
 
     def scope_checker(
         credentials: HTTPAuthorizationCredentials = Depends(security),
+        request: Request = None,
     ) -> Optional[dict]:
         if credentials is None:
             return None
@@ -499,8 +633,9 @@ def require_scope_if_agent(scope: str):
         if not token.startswith(config.token_prefix_access):
             return None
 
-        # Agent token — validate and enforce
-        agent_ctx = get_agentadmit_user(credentials)
+        # Agent token — validate and enforce (scope_used telemetry rides the
+        # verify call; local check below stays as defense in depth)
+        agent_ctx = _authenticate_agent(credentials, request=request, scope_used=scope)
         granted_scopes = agent_ctx.get("scopes", [])
 
         if scope not in granted_scopes:
@@ -526,6 +661,7 @@ def require_scope_if_agent(scope: str):
 
 def get_current_user_or_agent(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request = None,
 ) -> dict:
     """
     Accepts both regular app JWTs and AgentAdmit tokens.
@@ -543,8 +679,8 @@ def get_current_user_or_agent(
     token = credentials.credentials
 
     if token.startswith(config.token_prefix_access):
-        # AgentAdmit path
-        agent_ctx = get_agentadmit_user(credentials)
+        # AgentAdmit path (endpoint/method telemetry; no single scope known here)
+        agent_ctx = _authenticate_agent(credentials, request=request)
         return {"auth_type": "agent", **agent_ctx}
     else:
         # Regular user path — delegate to app's verifier

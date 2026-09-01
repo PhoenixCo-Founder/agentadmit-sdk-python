@@ -405,6 +405,28 @@ if result.user_intent:
     show_in_review_ui(result.user_intent)  # display/audit only — never an access decision
 ```
 
+## Per-Call Audit Telemetry
+
+Since 1.10.0, every verification call reports what the call actually did, so the
+app's tamper-evident audit log on the AgentAdmit hosted service records per-call
+usage instead of just token validity:
+
+- `scope_used` — the scope the route enforces, sent automatically by
+  `require_scope` / `require_scope_if_agent` (FastAPI, Flask, and Django).
+- `endpoint` — the inbound request path (path only; the query string is never
+  sent).
+- `method` — the HTTP method.
+
+No integration changes are needed: the decorators and dependencies you already
+use collect these automatically. Calls verified without a scope-enforcing entry
+point (for example `get_agentadmit_user` alone) still send endpoint and method,
+and the hosted audit log honestly records that no exercised scope was declared.
+
+The SDK also fails closed on per-call refusals: when the hosted service answers
+that the token is valid but THIS call is refused (`insufficient_scope`,
+`bound_exceeded` when a user-set usage ceiling is reached, or any future refusal
+class), the SDK returns 403 and never invokes your route handler.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

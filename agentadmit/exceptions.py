@@ -90,3 +90,19 @@ class IntrospectionUnavailableError(Exception):
 
     Distinct from an invalid token: callers must surface 502, never 401.
     """
+
+
+class VerifyRefusedError(AgentAdmitError):
+    """The hosted service answered active=true but refused THIS call.
+
+    Raised when an introspection response carries an ``error`` field on an
+    active token (``insufficient_scope``, ``bound_exceeded``, or a future
+    refusal class). The token is valid; this specific call must be denied
+    with HTTP 403 and ``payload`` as the response body. Never treat as a
+    401 invalid-token condition.
+    """
+
+    def __init__(self, code: str, payload: dict):
+        self.code = code
+        self.payload = payload
+        super().__init__(f"Call refused by the authorization service: {code}")
