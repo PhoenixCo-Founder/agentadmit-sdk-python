@@ -43,7 +43,7 @@ from django.http import JsonResponse
 from django.urls import path
 from django.conf import settings
 
-from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
 from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError
 from agentadmit.models import AppAttestedPresence
@@ -126,6 +126,7 @@ def _validate_agent_token(token: str, request=None, scope_used: Optional[str] = 
     method = (getattr(request, "method", "") or "").upper() or None if request is not None else None
     endpoint = endpoint[:500] if endpoint else None
     method = method[:20] if method else None
+    action_attestation_id = _request_attestation(request)
 
     # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service,
     # using the shared retry client (429 backoff, capped Retry-After, 120s
@@ -141,6 +142,7 @@ def _validate_agent_token(token: str, request=None, scope_used: Optional[str] = 
             scope_used=scope_used,
             endpoint=endpoint,
             method=method,
+            action_attestation_id=action_attestation_id,
         )
     except RateLimitError:
         raise

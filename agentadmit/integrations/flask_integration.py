@@ -26,7 +26,7 @@ from typing import Callable, Optional
 import httpx
 from flask import Blueprint, Flask, g, jsonify, request
 
-from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage, StorageBackend
@@ -114,6 +114,10 @@ class AgentAdmitFlask:
             endpoint, method = None, None
         endpoint = endpoint[:500] if endpoint else None
         method = method[:20] if method else None
+        try:
+            action_attestation_id = _request_attestation(request) if request else None
+        except RuntimeError:
+            action_attestation_id = None
 
         # MANDATORY INTROSPECTION — validate via AgentAdmit hosted service,
         # using the shared retry client (429 backoff, capped Retry-After,
@@ -129,6 +133,7 @@ class AgentAdmitFlask:
                 scope_used=scope_used,
                 endpoint=endpoint,
                 method=method,
+                action_attestation_id=action_attestation_id,
             )
         except RateLimitError:
             raise

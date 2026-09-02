@@ -106,3 +106,18 @@ class VerifyRefusedError(AgentAdmitError):
         self.code = code
         self.payload = payload
         super().__init__(f"Call refused by the authorization service: {code}")
+
+
+class ConfirmationRequiredError(VerifyRefusedError):
+    """``confirmation_required`` (1.11.0): the scope is granted, but THIS call
+    needs a fresh human confirmation. ``confirmation`` is the hosted ceremony
+    staged for the exact action (``action_session_url`` for the human,
+    ``action_session_id`` for the agent's retry header
+    ``X-AgentAdmit-Action-Attestation``). ``attestation_status`` explains why
+    a presented attestation was not accepted, when one was presented.
+    """
+
+    def __init__(self, payload: dict, confirmation: dict, attestation_status=None):
+        super().__init__("confirmation_required", payload)
+        self.confirmation = confirmation
+        self.attestation_status = attestation_status

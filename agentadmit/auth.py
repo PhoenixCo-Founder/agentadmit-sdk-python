@@ -82,6 +82,9 @@ def _introspect_with_retry(
     endpoint: Optional[str] = None,
     method: Optional[str] = None,
     consent_first: bool = False,
+    action_attestation_id: Optional[str] = None,
+    request_digest: Optional[str] = None,
+    action_summary: Optional[str] = None,
 ) -> "httpx.Response":
     """
     POST to the AgentAdmit introspection endpoint with automatic 429 retry.
@@ -114,6 +117,14 @@ def _introspect_with_retry(
         payload["method"] = method
     if consent_first:
         payload["consent_first"] = True
+    # Confirm-each-time (1.11.0): the agent's attestation on its retry, the
+    # request-body digest, and the app's plain-language action summary.
+    if action_attestation_id:
+        payload["action_attestation_id"] = action_attestation_id[:_ATTESTATION_MAX]
+    if request_digest:
+        payload["request_digest"] = request_digest[:_DIGEST_MAX]
+    if action_summary:
+        payload["action_summary"] = action_summary[:_SUMMARY_MAX]
 
     delay = 1.0  # seconds — initial backoff
     waited = 0.0  # cumulative wait across retries
@@ -222,6 +233,36 @@ _ENDPOINT_MAX = 500
 _METHOD_MAX = 20
 
 
+# Hosted BodySchema caps (verify route), confirm-each-time fields.
+_ATTESTATION_MAX = 120
+_DIGEST_MAX = 128
+_SUMMARY_MAX = 200
+
+#: Request header an agent sets on its retry after the human confirmed.
+ACTION_ATTESTATION_HEADER = "x-agentadmit-action-attestation"
+
+
+def _request_attestation(request) -> Optional[str]:
+    """The agent's ``X-AgentAdmit-Action-Attestation`` header, or None."""
+    if request is None:
+        return None
+    try:
+        value = request.headers.get(ACTION_ATTESTATION_HEADER)
+    except Exception:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()[:_ATTESTATION_MAX]
+
+
+def request_digest_for(body: Optional[bytes]) -> Optional[str]:
+    """``sha256:<hex>`` over the raw request body bytes, or None when empty."""
+    if not body:
+        return None
+    import hashlib
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
 def _request_telemetry(request) -> tuple:
     """(endpoint, method) from an inbound request, or (None, None).
 
@@ -271,10 +312,55 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
         if isinstance(data.get("renewal"), str):
             payload["renewal"] = data["renewal"]
         return payload
+    if error == "confirmation_required":
+        # Confirm-each-time (1.11.0): the scope is granted but THIS call needs
+        # a fresh human confirmation. Pass the staged ceremony through so the
+        # agent can hand the link to the human; nothing else from the wire.
+        payload = {
+            "error": "confirmation_required",
+            "error_description": data.get(
+                "error_description",
+                "This action requires a fresh human confirmation. Give the confirmation "
+                "link to the user, then retry with the X-AgentAdmit-Action-Attestation header.",
+            ),
+        }
+        confirmation = parse_action_confirmation(data.get("confirmation"))
+        if confirmation is not None:
+            payload["confirmation"] = confirmation
+        if isinstance(data.get("attestation_status"), str):
+            payload["attestation_status"] = data["attestation_status"]
+        if isinstance(data.get("attestation_description"), str):
+            payload["attestation_description"] = data["attestation_description"]
+        if isinstance(data.get("renewal"), str):
+            payload["renewal"] = data["renewal"]
+        return payload
     # Unknown refusal class: fail closed (forward-compatible).
     return {
         "error": error,
         "error_description": "Call refused by the authorization service.",
+    }
+
+
+def parse_action_confirmation(raw) -> Optional[dict]:
+    """Strictly typed copy of the wire ``confirmation`` block, or None."""
+    if not isinstance(raw, dict):
+        return None
+    for key in ("action_session_id", "action_session_url", "expires_at", "scope"):
+        if not isinstance(raw.get(key), str):
+            return None
+
+    def nullable(value):
+        return value if isinstance(value, str) else None
+
+    return {
+        "action_session_id": raw["action_session_id"],
+        "action_session_url": raw["action_session_url"],
+        "expires_at": raw["expires_at"],
+        "scope": raw["scope"],
+        "method": nullable(raw.get("method")),
+        "endpoint": nullable(raw.get("endpoint")),
+        "request_digest": nullable(raw.get("request_digest")),
+        "summary": nullable(raw.get("summary")),
     }
 
 
@@ -320,6 +406,8 @@ def _authenticate_agent(
     request: Request = None,
     scope_used: Optional[str] = None,
     consent_first: bool = False,
+    request_digest: Optional[str] = None,
+    action_summary: Optional[str] = None,
 ) -> dict:
     """Shared implementation behind get_agentadmit_user and require_scope*.
 
@@ -352,7 +440,8 @@ def _authenticate_agent(
 
     # Per-request introspection cache: two scope dependencies on one route
     # must not double-verify (and double-bill). Keyed by token.
-    cache_key = (token, scope_used, bool(consent_first))
+    action_attestation_id = _request_attestation(request)
+    cache_key = (token, scope_used, bool(consent_first), action_attestation_id, request_digest, action_summary)
     if request is not None:
         try:
             cache = getattr(request.state, "_agentadmit_ctx_cache", None)
@@ -379,6 +468,9 @@ def _authenticate_agent(
             endpoint=endpoint,
             method=http_method,
             consent_first=consent_first,
+            action_attestation_id=action_attestation_id,
+            request_digest=request_digest,
+            action_summary=action_summary,
         )
     except RateLimitError:
         raise  # Let RateLimitError propagate as-is for caller to handle
@@ -544,7 +636,23 @@ def presence_verified(agent_ctx: Optional[dict]) -> bool:
 # require_scope — strict scope enforcement (agent-only endpoints)
 # ---------------------------------------------------------------------------
 
-def require_scope(scope: str):
+def _finish_scope_check(agent_ctx: dict, scope: str) -> dict:
+    granted_scopes = agent_ctx.get("scopes", [])
+    if scope not in granted_scopes:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "insufficient_scope",
+                "required_scope": scope,
+                "granted_scopes": granted_scopes,
+                "message": f"This action requires '{scope}' scope. The user can grant additional scopes through AgentAdmit settings.",
+            },
+        )
+    log_agent_access(agent_ctx=agent_ctx, scope_used=scope)
+    return agent_ctx
+
+
+def require_scope(scope: str, action_summary: Optional[Callable] = None):
     """
     FastAPI dependency factory. Checks the agent's granted scopes include
     the required scope, then logs access.
@@ -554,7 +662,56 @@ def require_scope(scope: str):
         async def get_orders(agent_ctx=Depends(require_scope("read:orders"))):
             user = agent_ctx["user"]
             ...
+
+    ``action_summary`` (1.11.0, confirm-each-time routes): a callable
+    ``(body: Any, request) -> Optional[str]`` producing the plain-language
+    description of THIS action for the human ("Pay Alex $50"). When given,
+    the dependency reads the request body (JSON when possible, cached for
+    the handler), computes the ``sha256:`` request digest, and carries both
+    on the verify call. The hosted service refuses the first call with
+    ``confirmation_required`` (403 to the agent, carrying the confirmation
+    link) and accepts the retry that presents the
+    ``X-AgentAdmit-Action-Attestation`` header. AgentAdmit does not verify
+    the summary against the request; it proves what the human was shown.
     """
+    if action_summary is not None:
+        async def confirming_scope_checker(
+            credentials: HTTPAuthorizationCredentials = Depends(security),
+            request: Request = None,
+        ) -> dict:
+            raw = b""
+            body = None
+            if request is not None:
+                try:
+                    raw = await request.body()  # Starlette caches; the handler still sees it
+                except Exception:
+                    raw = b""
+                if raw:
+                    try:
+                        import json as _json
+                        body = _json.loads(raw)
+                    except Exception:
+                        body = None
+            summary = None
+            try:
+                summary = action_summary(body, request)
+            except Exception:
+                summary = None
+            if not isinstance(summary, str) or not summary.strip():
+                summary = None
+            else:
+                summary = summary.strip()[:_SUMMARY_MAX]
+            agent_ctx = _authenticate_agent(
+                credentials,
+                request=request,
+                scope_used=scope,
+                request_digest=request_digest_for(raw),
+                action_summary=summary,
+            )
+            return _finish_scope_check(agent_ctx, scope)
+
+        return confirming_scope_checker
+
     def scope_checker(
         credentials: HTTPAuthorizationCredentials = Depends(security),
         request: Request = None,
