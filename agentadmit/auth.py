@@ -373,6 +373,8 @@ def get_agentadmit_user(
     request: Request = None,
     scope_used: Optional[str] = None,
     consent_first: bool = False,
+    request_digest: Optional[str] = None,
+    action_summary: Optional[str] = None,
 ) -> dict:
     """
     Validates an AgentAdmit access token (ag_at_ prefixed RS256 JWT).
@@ -386,11 +388,18 @@ def get_agentadmit_user(
       6. Connection record exists with status == "active"
       7. User account exists
 
+    ``request_digest`` / ``action_summary`` (1.11.0): confirm-each-time
+    telemetry for custom gates that read the body themselves (see
+    ``require_scope(..., action_summary=...)`` for the managed path). The
+    agent's ``X-AgentAdmit-Action-Attestation`` header is read from
+    ``request`` automatically.
+
     Returns:
         {
             "user": <user document>,
             "connection": <connection document>,
             "scopes": <list[str]>,
+            "action_confirmation": {...}  # only when a confirmation was consumed
         }
     """
     return _authenticate_agent(
@@ -398,6 +407,8 @@ def get_agentadmit_user(
         request=request,
         scope_used=scope_used,
         consent_first=consent_first,
+        request_digest=request_digest,
+        action_summary=action_summary,
     )
 
 

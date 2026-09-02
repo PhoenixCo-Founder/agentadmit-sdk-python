@@ -214,3 +214,16 @@ def test_malformed_action_confirmation_is_dropped(monkeypatch):
 
     res = TestClient(app).get("/api/x", headers={"Authorization": "Bearer ag_at_x"})
     assert res.status_code == 200 and res.json()["has"] is False
+
+
+def test_get_agentadmit_user_accepts_custom_gate_telemetry(monkeypatch):
+    from agentadmit.auth import get_agentadmit_user
+    capture: dict = {}
+    _patch(monkeypatch, {"active": True, "user_id": "u1", "connection_id": "c1", "scopes": ["write:payments"]}, capture)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="ag_at_x")
+    ctx = get_agentadmit_user(creds, request=None, scope_used="write:payments", consent_first=True,
+                              request_digest="sha256:" + "0" * 64, action_summary="Pay Alex $50")
+    assert ctx["user"]["user_id"] == "u1"
+    assert capture["body"]["request_digest"] == "sha256:" + "0" * 64
+    assert capture["body"]["action_summary"] == "Pay Alex $50"
+    assert capture["body"]["consent_first"] is True
