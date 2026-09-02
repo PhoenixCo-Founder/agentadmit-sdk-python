@@ -97,12 +97,12 @@ def test_malformed_confirmation_block_is_dropped_and_unknown_class_fails_closed(
 
 def test_fastapi_confirming_dependency_carries_digest_summary_and_attestation(monkeypatch):
     capture: dict = {}
-    _patch(monkeypatch, {"active": True, "user_id": "u1", "connection_id": "c1", "scopes": ["write:payments"]}, capture)
+    _patch(monkeypatch, {"active": True, "user_id": "u1", "connection_id": "c1", "scopes": ["write:payments"], "action_confirmation": {"action_session_id": "asess_abc", "consumed": True}}, capture)
     app = FastAPI()
 
     @app.post("/api/payments")
     async def pay(agent_ctx=Depends(require_scope("write:payments", action_summary=lambda body, req: f"Pay {body['trainer']} ${body['amount']}"))):
-        return {"ok": True}
+        return {"ok": True, "confirmation": agent_ctx.get("action_confirmation")}
 
     client = TestClient(app)
     body = {"trainer": "alex", "amount": 50}
@@ -112,6 +112,7 @@ def test_fastapi_confirming_dependency_carries_digest_summary_and_attestation(mo
         headers={"Authorization": "Bearer ag_at_x", ACTION_ATTESTATION_HEADER: " asess_abc "},
     )
     assert res.status_code == 200
+    assert res.json()["confirmation"] == {"action_session_id": "asess_abc", "consumed": True}
     sent = capture["body"]
     assert sent["scope_used"] == "write:payments"
     assert sent["method"] == "POST" and sent["endpoint"] == "/api/payments"
@@ -200,3 +201,16 @@ def test_confirmation_required_error_type():
     assert err.code == "confirmation_required"
     assert err.confirmation["action_session_id"] == "asess_abc"
     assert err.attestation_status == "not_confirmed"
+
+
+def test_malformed_action_confirmation_is_dropped(monkeypatch):
+    capture: dict = {}
+    _patch(monkeypatch, {"active": True, "user_id": "u1", "connection_id": "c1", "scopes": ["read:x"], "action_confirmation": {"action_session_id": "asess_abc", "consumed": "yes"}}, capture)
+    app = FastAPI()
+
+    @app.get("/api/x")
+    async def get_x(agent_ctx=Depends(require_scope("read:x"))):
+        return {"has": "action_confirmation" in agent_ctx}
+
+    res = TestClient(app).get("/api/x", headers={"Authorization": "Bearer ag_at_x"})
+    assert res.status_code == 200 and res.json()["has"] is False

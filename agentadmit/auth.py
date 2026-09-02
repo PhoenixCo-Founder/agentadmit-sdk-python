@@ -595,6 +595,22 @@ def _authenticate_agent(
     if isinstance(user_intent, str):
         context["user_intent"] = user_intent
 
+    # Confirm-each-time (1.11.0): present only when THIS call was accepted
+    # because the hosted service consumed a human confirmation for exactly
+    # this action. Strict: a string session id and consumed is True, else
+    # dropped. Apps running their own transaction step-up can treat this as
+    # that confirmation instead of asking the human twice.
+    confirmation = introspection_data.get("action_confirmation")
+    if (
+        isinstance(confirmation, dict)
+        and isinstance(confirmation.get("action_session_id"), str)
+        and confirmation.get("consumed") is True
+    ):
+        context["action_confirmation"] = {
+            "action_session_id": confirmation["action_session_id"],
+            "consumed": True,
+        }
+
     if request is not None:
         try:
             cache = getattr(request.state, "_agentadmit_ctx_cache", None)
