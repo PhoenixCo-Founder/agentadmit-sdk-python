@@ -14,7 +14,7 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ class ScopeDefinition(BaseModel):
     description: str             # e.g., "View order history and delivery status"
     category: str = "General"    # e.g., "Shopping", "Business", "Admin"
     role: str = "user"           # e.g., "user", "admin", "trainer", etc.
+    # Confirm-each-time (1.11.0): exercising this scope needs a fresh human
+    # confirmation on the hosted service for EACH call (owner-declared; the
+    # catalog sync carries it). Default False = ordinary scoped access.
+    confirm_each_time: bool = False
 
 
 class DurationOption(BaseModel):
@@ -168,6 +172,24 @@ class AgentAdmitConfig(BaseModel):
     @classmethod
     def _validate_base_url_https(cls, v: str) -> str:
         return _require_https(v, "api_base_url")
+
+    @model_validator(mode="after")
+    def _derive_verify_url_from_api_url(self):
+        """One hosted-service origin, not two. Operators who point
+        ``agentadmit_api_url`` somewhere else (staging, a local rig) and leave
+        ``agentadmit_verify_url`` at its default expect verify to follow —
+        otherwise the catalog syncs to one service while every per-call verify
+        silently goes to production (caught on the TT dogfood rig, Sep 3, 2026).
+        An explicitly set verify URL is always respected."""
+        default_api = type(self).model_fields["agentadmit_api_url"].default
+        default_verify = type(self).model_fields["agentadmit_verify_url"].default
+        if (
+            self.agentadmit_verify_url == default_verify
+            and self.agentadmit_api_url
+            and self.agentadmit_api_url.rstrip("/") != default_api.rstrip("/")
+        ):
+            self.agentadmit_verify_url = f"{self.agentadmit_api_url.rstrip('/')}/api/v1/verify"
+        return self
 
 
 # ---------------------------------------------------------------------------
