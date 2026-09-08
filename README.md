@@ -5,6 +5,8 @@ User-mediated AI agent authorization for Python apps. Supports **FastAPI**, **Fl
 > **Get started:** Sign up at [agentadmit.com](https://agentadmit.com) and get your test keys. Install the SDK and build.
 > Test Mode keys are available immediately after signup. Live keys become available when you subscribe an app.
 
+> **Where the consent step runs (live keys).** The agent grant is approved on the AgentAdmit **hosted consent page**, opened on your app's behalf: your backend creates a consent session (`POST /api/v1/apps/{app_id}/consent-sessions`) with your live key and sends the signed-in user to the returned `session_url`. Scope selection, duration, intent, existing-grant review, the passkey ceremony, and the one-time token all happen there. **Direct token issuance (`POST /api/v1/apps/{app_id}/token`, and this SDK's issue-token helpers and any SDK-mounted `generate-token` route) is a sandbox facility for `aa_test_` keys only; a live key receives `403 hosted_consent_required`.** Verification (`/verify`) is unchanged and is the core of this SDK. Full walkthrough: [App Owner Guide, Step 4](https://agentadmit.com/docs/app-owner-guide).
+
 ## Quick Start
 
 **Requires Python 3.10+** (the install fails on 3.9 and older with a confusing resolver error — check `python3 --version` first).
