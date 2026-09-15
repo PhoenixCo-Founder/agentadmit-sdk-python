@@ -63,6 +63,8 @@ def _sync_scopes_to_hosted_service(config) -> bool:
                 "description": s.description,
                 "category": s.category,
                 "role": s.role,
+                # Owner-declared confirm-each-time rides the sync (1.11.0).
+                "confirm_each_time": bool(getattr(s, "confirm_each_time", False)),
             }
             for s in config.scopes
         ]

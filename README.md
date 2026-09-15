@@ -435,6 +435,82 @@ that the token is valid but THIS call is refused (`insufficient_scope`,
 `bound_exceeded` when a user-set usage ceiling is reached, or any future refusal
 class), the SDK returns 403 and never invokes your route handler.
 
+## Confirm Each Time (Exercise-Time Human Confirmation)
+
+Some actions should never run on a standing grant alone: moving money, sending
+or publishing on the user's behalf, deleting data, touching production. Mark
+those scopes `confirm_each_time: true` in `agentadmit.yaml` (or on
+`ScopeDefinition`), and the hosted service requires a fresh human confirmation
+for every call that exercises them, even inside a valid connection. The flag
+rides the startup catalog sync; unmarked scopes default to `false`.
+
+```yaml
+scopes:
+  - name: read:orders
+    description: View order history
+  - name: write:payments
+    description: Send payments on your behalf
+    category: Payments
+    confirm_each_time: true
+```
+
+How a call flows:
+
+1. The agent calls your route. The dependency verifies the token as usual,
+   carrying the exercised scope, a `sha256:` digest of the raw request body,
+   and the plain-language `action_summary` you provide.
+2. The hosted service refuses the first call with `confirmation_required` and
+   stages a one-time ceremony for exactly that action. Your route returns 403
+   with a `confirmation` block; the agent gives `confirmation["action_session_url"]`
+   to the user.
+3. The user confirms on AgentAdmit's hosted page with their passkey. The
+   signature commits to the scope, method, endpoint, request digest, and the
+   summary they saw. Only a user-verified ceremony produces an attestation; the
+   agent cannot complete it.
+4. The agent retries the same request with the header
+   `X-AgentAdmit-Action-Attestation: <action_session_id>`. The SDK forwards it,
+   the hosted service consumes the attestation once (exact action only), and
+   the call proceeds. The audit row names the confirmation.
+
+```python
+from agentadmit.auth import require_scope
+
+@app.post("/api/payments")
+async def pay(
+    payload: PaymentIn,
+    agent_ctx=Depends(require_scope(
+        "write:payments",
+        action_summary=lambda body, request: f"Pay {body['trainer']} ${body['amount']}",
+    )),
+):
+    ...
+```
+
+`action_summary` receives the parsed JSON body (or `None`) and the request.
+When it is given, the dependency reads the body once (Starlette caches it for
+your handler) and computes the request digest. Flask and Django decorators
+forward the attestation header automatically.
+
+Notes:
+
+- The summary is yours. AgentAdmit shows it as the headline of the confirmation
+  page and commits to the text shown; it does not verify the description
+  against the request.
+- A confirmation covers exactly one call. A retry with a different body, route,
+  method, or summary is refused again with `attestation_status: "action_mismatch"`.
+- Flask and Django raise `ConfirmationRequiredError` (a `VerifyRefusedError`
+  subclass, so existing handlers still see a 403): `.confirmation` is the typed
+  ceremony block, `.attestation_status` explains a rejected attestation, and
+  `.payload` is the full 403 body. FastAPI's `require_scope` returns the same
+  body as the `HTTPException` detail. The confirmation block is copied
+  field-by-field (`action_session_id`, `action_session_url`, `expires_at`,
+  `scope`, plus optional `method`, `endpoint`, `request_digest`, `summary`);
+  a malformed block is dropped and the call is still refused.
+- Any other refusal class (`insufficient_scope`, `bound_exceeded`, or one this
+  SDK does not know yet) still fails closed with a 403, unchanged from 1.10.0.
+- Confirmation only applies when the call declares the exercised scope, which
+  `require_scope` always does.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.
