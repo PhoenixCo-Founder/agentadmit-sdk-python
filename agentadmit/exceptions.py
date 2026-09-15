@@ -4,6 +4,8 @@ agentadmit.exceptions
 Custom exceptions for the AgentAdmit SDK.
 """
 
+from typing import Optional
+
 
 class AgentAdmitError(Exception):
     """Base exception for all AgentAdmit errors."""
@@ -117,7 +119,28 @@ class ConfirmationRequiredError(VerifyRefusedError):
     a presented attestation was not accepted, when one was presented.
     """
 
-    def __init__(self, payload: dict, confirmation: dict, attestation_status=None):
+    def __init__(self, payload: dict, confirmation: Optional[dict] = None, attestation_status: Optional[str] = None):
         super().__init__("confirmation_required", payload)
+        # None when the hosted service named the class but sent no well-formed
+        # ceremony block; the call is still refused (fail closed).
         self.confirmation = confirmation
         self.attestation_status = attestation_status
+
+
+def verify_refused_error(payload: dict) -> VerifyRefusedError:
+    """Build the typed refusal for an ``_active_refusal_payload`` result.
+
+    ``confirmation_required`` becomes :class:`ConfirmationRequiredError` (a
+    ``VerifyRefusedError`` subclass, so existing ``except VerifyRefusedError``
+    handlers keep working); every other class stays ``VerifyRefusedError``.
+    """
+    code = payload.get("error")
+    if code == "confirmation_required":
+        confirmation = payload.get("confirmation")
+        status = payload.get("attestation_status")
+        return ConfirmationRequiredError(
+            payload,
+            confirmation if isinstance(confirmation, dict) else None,
+            status if isinstance(status, str) else None,
+        )
+    return VerifyRefusedError(code, payload)

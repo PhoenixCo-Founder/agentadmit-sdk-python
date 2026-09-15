@@ -439,9 +439,20 @@ class), the SDK returns 403 and never invokes your route handler.
 
 Some actions should never run on a standing grant alone: moving money, sending
 or publishing on the user's behalf, deleting data, touching production. Mark
-those scopes `confirm_each_time: true` when you register them, and the hosted
-service requires a fresh human confirmation for every call that exercises
-them, even inside a valid connection.
+those scopes `confirm_each_time: true` in `agentadmit.yaml` (or on
+`ScopeDefinition`), and the hosted service requires a fresh human confirmation
+for every call that exercises them, even inside a valid connection. The flag
+rides the startup catalog sync; unmarked scopes default to `false`.
+
+```yaml
+scopes:
+  - name: read:orders
+    description: View order history
+  - name: write:payments
+    description: Send payments on your behalf
+    category: Payments
+    confirm_each_time: true
+```
 
 How a call flows:
 
@@ -487,9 +498,16 @@ Notes:
   against the request.
 - A confirmation covers exactly one call. A retry with a different body, route,
   method, or summary is refused again with `attestation_status: "action_mismatch"`.
-- Flask and Django raise `VerifyRefusedError` with the `confirmation` block in
-  `payload`; `agentadmit.exceptions.ConfirmationRequiredError` types it when you
-  build your own gate.
+- Flask and Django raise `ConfirmationRequiredError` (a `VerifyRefusedError`
+  subclass, so existing handlers still see a 403): `.confirmation` is the typed
+  ceremony block, `.attestation_status` explains a rejected attestation, and
+  `.payload` is the full 403 body. FastAPI's `require_scope` returns the same
+  body as the `HTTPException` detail. The confirmation block is copied
+  field-by-field (`action_session_id`, `action_session_url`, `expires_at`,
+  `scope`, plus optional `method`, `endpoint`, `request_digest`, `summary`);
+  a malformed block is dropped and the call is still refused.
+- Any other refusal class (`insufficient_scope`, `bound_exceeded`, or one this
+  SDK does not know yet) still fails closed with a 403, unchanged from 1.10.0.
 - Confirmation only applies when the call declares the exercised scope, which
   `require_scope` always does.
 

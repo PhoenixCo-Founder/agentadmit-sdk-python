@@ -30,7 +30,7 @@ from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _re
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage, StorageBackend
-from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError, VerifyRefusedError
+from agentadmit.exceptions import ConfigurationError, IntrospectionUnavailableError, RateLimitError, VerifyRefusedError, verify_refused_error
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +163,7 @@ class AgentAdmitFlask:
         # deliberately omit identity fields.
         refusal = _active_refusal_payload(data, scope_used)
         if refusal is not None:
-            raise VerifyRefusedError(refusal["error"], refusal)
+            raise verify_refused_error(refusal)  # ConfirmationRequiredError when typed
 
         # M5: Validate field types to block NoSQL-injection via crafted responses.
         scopes = data.get("scopes", [])

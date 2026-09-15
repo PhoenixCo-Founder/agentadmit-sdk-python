@@ -45,7 +45,7 @@ from django.conf import settings
 
 from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
-from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError
+from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError, verify_refused_error
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage
 
@@ -171,7 +171,7 @@ def _validate_agent_token(token: str, request=None, scope_used: Optional[str] = 
     # before field validation: refusal responses omit identity fields.
     refusal = _active_refusal_payload(data, scope_used)
     if refusal is not None:
-        raise VerifyRefusedError(refusal["error"], refusal)
+        raise verify_refused_error(refusal)  # ConfirmationRequiredError when typed
 
     # M5: Validate field types to block NoSQL-injection via crafted responses.
     scopes = data.get("scopes", [])

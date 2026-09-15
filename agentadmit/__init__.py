@@ -30,6 +30,8 @@ from agentadmit.auth import (
     presence_verified,
     log_agent_access,
     check_connection_cap,
+    request_digest_for,
+    ACTION_ATTESTATION_HEADER,
 )
 from agentadmit.routes import create_agentadmit_router
 # keys.py is deprecated — AgentAdmit is a hosted service, no local keys needed
@@ -55,6 +57,7 @@ from agentadmit.exceptions import (
     ConfigurationError,
     WebhookSignatureError,
     VerifyRefusedError,
+    ConfirmationRequiredError,
 )
 
 __all__ = [
@@ -81,6 +84,10 @@ __all__ = [
     "require_presence",
     "presence_verified",
 
+    # Confirm each time (exercise-time human confirmation)
+    "request_digest_for",
+    "ACTION_ATTESTATION_HEADER",
+
     # Alerts API
     "configure_alerts",
     "list_alerts",
@@ -104,4 +111,5 @@ __all__ = [
     "ConfigurationError",
     "WebhookSignatureError",
     "VerifyRefusedError",
+    "ConfirmationRequiredError",
 ]

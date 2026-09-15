@@ -227,3 +227,109 @@ def test_get_agentadmit_user_accepts_custom_gate_telemetry(monkeypatch):
     assert capture["body"]["request_digest"] == "sha256:" + "0" * 64
     assert capture["body"]["action_summary"] == "Pay Alex $50"
     assert capture["body"]["consent_first"] is True
+
+
+def test_verify_refused_error_factory_types_only_confirmation_required():
+    from agentadmit.exceptions import verify_refused_error
+
+    typed = verify_refused_error({"error": "confirmation_required", "confirmation": CONFIRMATION, "attestation_status": "expired"})
+    assert type(typed) is ConfirmationRequiredError
+    assert typed.confirmation == CONFIRMATION and typed.attestation_status == "expired"
+    assert typed.payload["confirmation"] == CONFIRMATION
+    bare = verify_refused_error({"error": "confirmation_required"})
+    assert type(bare) is ConfirmationRequiredError and bare.confirmation is None
+    plain = verify_refused_error({"error": "bound_exceeded", "error_description": "x"})
+    assert type(plain) is VerifyRefusedError and plain.code == "bound_exceeded"
+
+
+def test_flask_confirmation_required_is_typed_and_returns_403_with_link(monkeypatch):
+    from flask import Flask
+
+    def fake_introspect(url, token, app_id, api_key, **kwargs):
+        return httpx.Response(
+            200,
+            json={"active": True, "error": "confirmation_required", "confirmation": CONFIRMATION},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(fi, "_introspect_with_retry", fake_introspect)
+    aa = fi.AgentAdmitFlask.__new__(fi.AgentAdmitFlask)
+    aa.config = _fake_config()
+    aa.storage = MemoryStorage()
+    aa._verify_user_token = None
+    app = Flask(__name__)
+
+    # Custom gates get the typed exception (still a VerifyRefusedError).
+    with app.test_request_context("/api/payments", method="POST"):
+        with pytest.raises(VerifyRefusedError) as exc:
+            aa._validate_agent_token("ag_at_x", scope_used="write:payments")
+    assert isinstance(exc.value, ConfirmationRequiredError)
+    assert exc.value.confirmation["action_session_url"] == CONFIRMATION["action_session_url"]
+
+    # The decorator relays the link as a 403 and never runs the view.
+    @app.post("/api/payments")
+    @aa.require_scope("write:payments")
+    def pay():
+        raise AssertionError("view must not run")
+
+    res = app.test_client().post("/api/payments", json={"a": 1}, headers={"Authorization": "Bearer ag_at_x"})
+    assert res.status_code == 403
+    body = res.get_json()
+    assert body["error"] == "confirmation_required"
+    assert body["confirmation"]["action_session_id"] == "asess_abc"
+
+
+def test_django_confirmation_required_is_typed_and_returns_403_with_link(monkeypatch):
+    import json as _json
+
+    import django
+    from django.conf import settings as dj_settings
+
+    if not dj_settings.configured:
+        dj_settings.configure(DEBUG=True, ALLOWED_HOSTS=["*"], USE_TZ=True)
+        django.setup()
+    from agentadmit.integrations import django_integration as di
+
+    seen: dict = {}
+
+    def fake_introspect(*args, **kwargs):
+        seen.update(kwargs)
+        return httpx.Response(200, json={"active": True, "error": "confirmation_required", "confirmation": CONFIRMATION})
+
+    monkeypatch.setattr(di, "_introspect_with_retry", fake_introspect)
+    monkeypatch.setattr(di, "_init", lambda: None)
+    monkeypatch.setattr(di, "_config", _fake_config())
+    monkeypatch.setattr(di, "_storage", MemoryStorage())
+    monkeypatch.setattr(di, "_log_access", lambda *a, **kw: None)
+
+    request = SimpleNamespace(
+        META={"HTTP_AUTHORIZATION": "Bearer ag_at_x"},
+        headers={ACTION_ATTESTATION_HEADER: "asess_abc"},
+        path="/api/payments",
+        method="POST",
+    )
+    with pytest.raises(VerifyRefusedError) as exc:
+        di._validate_agent_token("ag_at_x", request=request, scope_used="write:payments")
+    assert isinstance(exc.value, ConfirmationRequiredError)
+    assert exc.value.confirmation["action_session_url"] == CONFIRMATION["action_session_url"]
+    assert seen["action_attestation_id"] == "asess_abc"  # Django forwards the retry header too
+
+    @di.require_scope("write:payments")
+    def view(request):
+        raise AssertionError("view must not run")
+
+    resp = view(request)
+    assert resp.status_code == 403
+    body = _json.loads(resp.content)
+    assert body["error"] == "confirmation_required"
+    assert body["confirmation"]["action_session_id"] == "asess_abc"
+
+
+def test_public_exports():
+    import agentadmit
+
+    assert agentadmit.ConfirmationRequiredError is ConfirmationRequiredError
+    assert agentadmit.ACTION_ATTESTATION_HEADER == ACTION_ATTESTATION_HEADER
+    assert agentadmit.request_digest_for is request_digest_for
+    for name in ("ConfirmationRequiredError", "ACTION_ATTESTATION_HEADER", "request_digest_for"):
+        assert name in agentadmit.__all__
