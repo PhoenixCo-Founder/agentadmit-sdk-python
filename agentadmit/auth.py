@@ -334,10 +334,56 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
         if isinstance(data.get("renewal"), str):
             payload["renewal"] = data["renewal"]
         return payload
+    if error == "confirmation_declined":
+        # Confirm-each-time (1.12.0): the user declined exactly this action on
+        # the hosted page and the hold still runs. Relay the decline so the
+        # agent can tell the user instead of nagging with a link; nothing else
+        # from the wire.
+        payload = {
+            "error": "confirmation_declined",
+            "error_description": data.get(
+                "error_description",
+                "The user declined this action on the hosted confirmation page. "
+                "Do not retry it unless the user asks you to.",
+            ),
+        }
+        declined = parse_action_decline(data.get("declined"))
+        if declined is not None:
+            payload["declined"] = declined
+        if isinstance(data.get("attestation_status"), str):
+            payload["attestation_status"] = data["attestation_status"]
+        if isinstance(data.get("attestation_description"), str):
+            payload["attestation_description"] = data["attestation_description"]
+        if isinstance(data.get("renewal"), str):
+            payload["renewal"] = data["renewal"]
+        return payload
     # Unknown refusal class: fail closed (forward-compatible).
     return {
         "error": error,
         "error_description": "Call refused by the authorization service.",
+    }
+
+
+def parse_action_decline(raw) -> Optional[dict]:
+    """Strictly typed copy of the wire ``declined`` block, or None."""
+    if not isinstance(raw, dict):
+        return None
+    for key in ("action_session_id", "declined_at", "hold_until", "scope"):
+        if not isinstance(raw.get(key), str):
+            return None
+
+    def nullable(value):
+        return value if isinstance(value, str) else None
+
+    return {
+        "action_session_id": raw["action_session_id"],
+        "declined_at": raw["declined_at"],
+        "hold_until": raw["hold_until"],
+        "scope": raw["scope"],
+        "method": nullable(raw.get("method")),
+        "endpoint": nullable(raw.get("endpoint")),
+        "request_digest": nullable(raw.get("request_digest")),
+        "summary": nullable(raw.get("summary")),
     }
 
 

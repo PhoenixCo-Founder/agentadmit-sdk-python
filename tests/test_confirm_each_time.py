@@ -333,3 +333,95 @@ def test_public_exports():
     assert agentadmit.request_digest_for is request_digest_for
     for name in ("ConfirmationRequiredError", "ACTION_ATTESTATION_HEADER", "request_digest_for"):
         assert name in agentadmit.__all__
+
+
+# ---------------------------------------------------------------------------
+# confirmation_declined (1.12.0): the user's explicit no, relayed typed
+# ---------------------------------------------------------------------------
+
+DECLINED = {
+    "action_session_id": "asess_abc",
+    "declined_at": "2026-09-22T21:35:42.000Z",
+    "hold_until": "2026-09-22T21:50:42.000Z",
+    "scope": "write:payments",
+    "method": "POST",
+    "endpoint": "/api/payments",
+    "request_digest": "sha256:deadbeef",
+    "summary": "Pay Alex $50",
+}
+
+
+def test_declined_refusal_payload_relays_the_decline_block():
+    from agentadmit.auth import parse_action_decline
+
+    payload = _active_refusal_payload(
+        {
+            "active": True,
+            "error": "confirmation_declined",
+            "error_description": "The user declined this action on the hosted confirmation page. Do not retry it unless the user asks you to; no new confirmation can be staged for this action until 2026-09-22T21:50:42.000Z.",
+            "declined": DECLINED,
+            "attestation_status": "declined",
+            "attestation_description": "The user declined this action.",
+            "renewal": "Only the user can lift a decline. After the hold ends, a retry stages a fresh confirmation for them to approve or decline again.",
+            "scopes": ["leak"],
+        },
+        "write:payments",
+    )
+    assert payload["error"] == "confirmation_declined"
+    assert payload["declined"] == DECLINED
+    assert payload["attestation_status"] == "declined"
+    assert "declined" in payload["attestation_description"]
+    assert "Only the user" in payload["renewal"]
+    assert "Do not retry" in payload["error_description"]
+    assert "scopes" not in payload and "confirmation" not in payload
+    # default description when the wire omits it
+    bare = _active_refusal_payload({"active": True, "error": "confirmation_declined", "declined": DECLINED}, "s")
+    assert "Do not retry it unless the user asks" in bare["error_description"]
+    assert parse_action_decline({"action_session_id": "a", "declined_at": "d", "hold_until": "h", "scope": "s"}) == {
+        "action_session_id": "a", "declined_at": "d", "hold_until": "h", "scope": "s",
+        "method": None, "endpoint": None, "request_digest": None, "summary": None,
+    }
+    assert parse_action_decline({"action_session_id": "a", "declined_at": "d", "scope": "s"}) is None
+    assert parse_action_decline("nope") is None
+
+
+def test_malformed_declined_block_is_dropped_and_still_refused():
+    payload = _active_refusal_payload({"active": True, "error": "confirmation_declined", "declined": {"action_session_id": "a", "hold_until": 7}}, "s")
+    assert payload["error"] == "confirmation_declined" and "declined" not in payload
+
+
+def test_verify_refused_error_factory_types_confirmation_declined():
+    from agentadmit.exceptions import ConfirmationDeclinedError, verify_refused_error
+
+    typed = verify_refused_error({"error": "confirmation_declined", "declined": DECLINED, "attestation_status": "declined"})
+    assert type(typed) is ConfirmationDeclinedError and isinstance(typed, VerifyRefusedError)
+    assert not isinstance(typed, ConfirmationRequiredError)
+    assert typed.code == "confirmation_declined"
+    assert typed.declined == DECLINED and typed.attestation_status == "declined"
+    assert typed.payload["declined"] == DECLINED
+    bare = verify_refused_error({"error": "confirmation_declined"})
+    assert type(bare) is ConfirmationDeclinedError and bare.declined is None and bare.attestation_status is None
+
+
+def test_fastapi_confirmation_declined_is_a_403_with_the_decline_block(monkeypatch):
+    capture: dict = {}
+    _patch(monkeypatch, {"active": True, "error": "confirmation_declined", "declined": DECLINED, "renewal": "Only the user can lift a decline."}, capture)
+    app = FastAPI()
+
+    @app.post("/api/payments")
+    async def pay(agent_ctx=Depends(require_scope("write:payments", action_summary=lambda req, raw: "Pay Alex $50"))):
+        return {"ok": True}
+
+    res = TestClient(app).post("/api/payments", json={"amount": 50}, headers={"Authorization": "Bearer ag_at_x"})
+    assert res.status_code == 403
+    body = res.json()["detail"]
+    assert body["error"] == "confirmation_declined" and body["declined"] == DECLINED
+    assert "Only the user" in body["renewal"] and "confirmation" not in body
+
+
+def test_public_exports_include_confirmation_declined():
+    import agentadmit
+    from agentadmit.exceptions import ConfirmationDeclinedError
+
+    assert agentadmit.ConfirmationDeclinedError is ConfirmationDeclinedError
+    assert "ConfirmationDeclinedError" in agentadmit.__all__

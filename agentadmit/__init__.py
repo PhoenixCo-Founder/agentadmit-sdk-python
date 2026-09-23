@@ -58,6 +58,7 @@ from agentadmit.exceptions import (
     WebhookSignatureError,
     VerifyRefusedError,
     ConfirmationRequiredError,
+    ConfirmationDeclinedError,
 )
 
 __all__ = [
@@ -112,4 +113,5 @@ __all__ = [
     "WebhookSignatureError",
     "VerifyRefusedError",
     "ConfirmationRequiredError",
+    "ConfirmationDeclinedError",
 ]
