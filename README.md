@@ -506,6 +506,17 @@ Notes:
   field-by-field (`action_session_id`, `action_session_url`, `expires_at`,
   `scope`, plus optional `method`, `endpoint`, `request_digest`, `summary`);
   a malformed block is dropped and the call is still refused.
+- **The user can decline.** If the user taps Decline on the hosted page, the
+  hosted service answers the agent's retry with `confirmation_declined` and
+  holds that answer until `declined["hold_until"]`; no new ceremony is staged
+  and the user is not notified again. FastAPI's `require_scope` returns the
+  403 body with the typed `declined` block (`action_session_id`,
+  `declined_at`, `hold_until`, `scope`, plus optional `method`, `endpoint`,
+  `request_digest`, `summary`); Flask and Django raise
+  `ConfirmationDeclinedError` (a `VerifyRefusedError` subclass) with
+  `.declined` and `.attestation_status`. Agents should relay the decline to
+  the user and not retry unless the user asks; only the user can lift a
+  decline, and after the hold ends a retry stages a fresh confirmation.
 - Any other refusal class (`insufficient_scope`, `bound_exceeded`, or one this
   SDK does not know yet) still fails closed with a 403, unchanged from 1.10.0.
 - Confirmation only applies when the call declares the exercised scope, which

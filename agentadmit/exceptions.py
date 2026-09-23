@@ -127,20 +127,48 @@ class ConfirmationRequiredError(VerifyRefusedError):
         self.attestation_status = attestation_status
 
 
+class ConfirmationDeclinedError(VerifyRefusedError):
+    """``confirmation_declined`` (1.12.0): the user declined exactly this
+    action on the hosted confirmation page and the hosted service holds that
+    answer until ``declined["hold_until"]``. No new ceremony is staged and no
+    notification is sent while the hold runs. ``declined`` is the typed
+    decline block (``action_session_id``, ``declined_at``, ``hold_until``,
+    ``scope`` plus optional ``method``, ``endpoint``, ``request_digest``,
+    ``summary``); ``attestation_status`` explains why a presented attestation
+    was not accepted, when one was presented. Agents should relay the decline
+    to the user and not retry unless the user asks; only the user can lift it.
+    """
+
+    def __init__(self, payload: dict, declined: Optional[dict] = None, attestation_status: Optional[str] = None):
+        super().__init__("confirmation_declined", payload)
+        # None when the hosted service named the class but sent no well-formed
+        # decline block; the call is still refused (fail closed).
+        self.declined = declined
+        self.attestation_status = attestation_status
+
+
 def verify_refused_error(payload: dict) -> VerifyRefusedError:
     """Build the typed refusal for an ``_active_refusal_payload`` result.
 
-    ``confirmation_required`` becomes :class:`ConfirmationRequiredError` (a
-    ``VerifyRefusedError`` subclass, so existing ``except VerifyRefusedError``
+    ``confirmation_required`` becomes :class:`ConfirmationRequiredError` and
+    ``confirmation_declined`` becomes :class:`ConfirmationDeclinedError` (both
+    ``VerifyRefusedError`` subclasses, so existing ``except VerifyRefusedError``
     handlers keep working); every other class stays ``VerifyRefusedError``.
     """
     code = payload.get("error")
+    status = payload.get("attestation_status")
     if code == "confirmation_required":
         confirmation = payload.get("confirmation")
-        status = payload.get("attestation_status")
         return ConfirmationRequiredError(
             payload,
             confirmation if isinstance(confirmation, dict) else None,
+            status if isinstance(status, str) else None,
+        )
+    if code == "confirmation_declined":
+        declined = payload.get("declined")
+        return ConfirmationDeclinedError(
+            payload,
+            declined if isinstance(declined, dict) else None,
             status if isinstance(status, str) else None,
         )
     return VerifyRefusedError(code, payload)
