@@ -43,7 +43,7 @@ from django.http import JsonResponse
 from django.urls import path
 from django.conf import settings
 
-from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _request_attestation, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _report_outcome_from_status, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
 from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError, verify_refused_error
 from agentadmit.models import AppAttestedPresence
@@ -290,7 +290,7 @@ class AgentAdmitMiddleware:
 # Decorators
 # ---------------------------------------------------------------------------
 
-def require_scope(scope: str):
+def require_scope(scope: str, report_outcome: bool = False):
     """Decorator: require scope (agent-only)."""
     def decorator(view_func):
         @functools.wraps(view_func)
@@ -319,7 +319,10 @@ def require_scope(scope: str):
 
             _log_access(ctx, scope, request)
             request.agentadmit_user = {"auth_type": "agent", **ctx}
-            return view_func(request, *args, **kwargs)
+            response = view_func(request, *args, **kwargs)
+            if report_outcome:
+                _report_outcome_from_status(ctx.get("audit_row_id"), getattr(response, "status_code", None))
+            return response
         return wrapped
     return decorator
 
@@ -366,7 +369,7 @@ def require_presence():
     return decorator
 
 
-def require_scope_if_agent(scope: str):
+def require_scope_if_agent(scope: str, report_outcome: bool = False):
     """Decorator: enforce scope only for agent tokens."""
     def decorator(view_func):
         @functools.wraps(view_func)
@@ -395,7 +398,10 @@ def require_scope_if_agent(scope: str):
 
             _log_access(ctx, scope, request)
             request.agentadmit_user = {"auth_type": "agent", **ctx}
-            return view_func(request, *args, **kwargs)
+            response = view_func(request, *args, **kwargs)
+            if report_outcome:
+                _report_outcome_from_status(ctx.get("audit_row_id"), getattr(response, "status_code", None))
+            return response
         return wrapped
     return decorator
 

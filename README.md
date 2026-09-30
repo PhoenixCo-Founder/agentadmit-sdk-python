@@ -603,6 +603,27 @@ entirely - the SDK handles the endpoint and calls your function to filter result
 
 Full integration guide: https://agentadmit.com/docs/app-owner-guide
 
+## Outcome Reporting
+
+Successful verify responses can include `audit_row_id`. Use it to append what your app reported happened after the guarded handler ran:
+
+```python
+from agentadmit import report_outcome
+
+report_outcome(audit_row_id, "executed", "2xx")
+```
+
+`outcome` is `executed`, `failed`, or `unknown`; `status_class` is optional and must be `1xx` through `5xx`. FastAPI automatic reporting is opt-in on the dependency and needs `AgentAdmitMiddleware` so the SDK can observe the final response status:
+
+```python
+app.add_middleware(AgentAdmitMiddleware, config_path="agentadmit.yaml")
+
+@app.post("/api/payments")
+async def pay(agent_ctx=Depends(require_scope("write:payments", report_outcome=True))):
+    ...
+```
+
+Flask and Django accept the same `report_outcome=True` option on `require_scope` and `require_scope_if_agent`. Automatic reporting only runs after the framework returns a response and the verify result contains `audit_row_id`. HTTP status `<400` maps to `executed`; status `>=400` maps to `failed`. The SDK does not guess `unknown`, skips missing or unobservable responses, and logs reporting failures without replacing your app response. A hosted `already_consumed` replay diagnostic is exposed as `consumed_receipt`; it is review data, not authorization to run the action again.
 
 ## Data Collection & Privacy
 

@@ -23,10 +23,11 @@ import httpx
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.background import BackgroundTask, BackgroundTasks
 
 from agentadmit.config import load_config, get_config
 from agentadmit.storage import create_storage
-from agentadmit.auth import _set_storage, _set_user_verifier
+from agentadmit.auth import _report_outcome_from_status, _set_storage, _set_user_verifier
 from agentadmit.routes import create_agentadmit_router
 
 logger = logging.getLogger(__name__)
@@ -183,5 +184,21 @@ class AgentAdmitMiddleware(BaseHTTPMiddleware):
             )
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        """Pass-through middleware — initialization happens in __init__."""
-        return await call_next(request)
+        """Pass-through middleware with optional post-response outcome reporting."""
+        response = await call_next(request)
+
+        if getattr(request.state, "agentadmit_report_outcome", False):
+            audit_row_id = getattr(request.state, "agentadmit_outcome_audit_row_id", None)
+            if audit_row_id:
+                task = BackgroundTask(_report_outcome_from_status, audit_row_id, response.status_code)
+                if response.background is None:
+                    response.background = task
+                elif isinstance(response.background, BackgroundTasks):
+                    response.background.add_task(_report_outcome_from_status, audit_row_id, response.status_code)
+                else:
+                    tasks = BackgroundTasks()
+                    tasks.add_task(response.background)
+                    tasks.add_task(_report_outcome_from_status, audit_row_id, response.status_code)
+                    response.background = tasks
+
+        return response
