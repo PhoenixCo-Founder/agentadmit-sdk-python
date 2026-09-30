@@ -31,6 +31,7 @@ from agentadmit.auth import (
     log_agent_access,
     check_connection_cap,
     request_digest_for,
+    report_outcome,
     ACTION_ATTESTATION_HEADER,
 )
 from agentadmit.routes import create_agentadmit_router
@@ -87,6 +88,7 @@ __all__ = [
 
     # Confirm each time (exercise-time human confirmation)
     "request_digest_for",
+    "report_outcome",
     "ACTION_ATTESTATION_HEADER",
 
     # Alerts API

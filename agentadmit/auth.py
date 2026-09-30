@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 import httpx
 import jwt
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from agentadmit.config import get_config
@@ -240,6 +240,79 @@ _SUMMARY_MAX = 200
 
 #: Request header an agent sets on its retry after the human confirmed.
 ACTION_ATTESTATION_HEADER = "x-agentadmit-action-attestation"
+
+OUTCOMES = {"executed", "failed", "unknown"}
+STATUS_CLASSES = {"1xx", "2xx", "3xx", "4xx", "5xx"}
+
+
+def status_class_for(status_code: Optional[int]) -> Optional[str]:
+    if not isinstance(status_code, int) or status_code < 100 or status_code > 599:
+        return None
+    return f"{status_code // 100}xx"
+
+
+def outcome_for_status(status_code: Optional[int]) -> Optional[str]:
+    klass = status_class_for(status_code)
+    if klass is None:
+        return None
+    return "executed" if status_code < 400 else "failed"
+
+
+def report_outcome(audit_row_id: str, outcome: str, status_class: Optional[str] = None) -> dict:
+    """Report what the app observed after a successful verify call.
+
+    This appends an outcome row to AgentAdmit's tamper-evident audit chain.
+    It reports what the app says happened; it is not independent proof of
+    execution. Use ``unknown`` when the app cannot truthfully classify the
+    result.
+    """
+    if not isinstance(audit_row_id, str) or not audit_row_id:
+        raise ValueError("audit_row_id is required")
+    if outcome not in OUTCOMES:
+        raise ValueError("outcome must be executed, failed, or unknown")
+    if status_class is not None and status_class not in STATUS_CLASSES:
+        raise ValueError("status_class must be 1xx, 2xx, 3xx, 4xx, 5xx, or None")
+    config = get_config()
+    resp = httpx.post(
+        f"{config.agentadmit_api_url.rstrip('/')}/api/v1/audit/{audit_row_id}/outcome",
+        headers={"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"},
+        json={"outcome": outcome, "status_class": status_class},
+        timeout=10,
+    )
+    if resp.status_code >= 400:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        raise AgentAdmitErrorForOutcome(data.get("error_description") or data.get("error") or f"Outcome report failed with HTTP {resp.status_code}")
+    return resp.json()
+
+
+class AgentAdmitErrorForOutcome(Exception):
+    pass
+
+
+def _report_outcome_from_status(audit_row_id: Optional[str], status_code: Optional[int]) -> None:
+    if not audit_row_id:
+        return
+    status_class = status_class_for(status_code)
+    outcome = outcome_for_status(status_code)
+    if status_class is None or outcome is None:
+        return
+    try:
+        report_outcome(audit_row_id, outcome, status_class)
+    except Exception as exc:
+        logger.error("AgentAdmit outcome report failed: %s", exc)
+
+
+def _mark_outcome_report(request, audit_row_id: Optional[str]) -> None:
+    if request is None or not audit_row_id:
+        return
+    try:
+        request.state.agentadmit_report_outcome = True
+        request.state.agentadmit_outcome_audit_row_id = audit_row_id
+    except Exception:
+        return
 
 
 def _request_attestation(request) -> Optional[str]:
@@ -668,6 +741,25 @@ def _authenticate_agent(
             "consumed": True,
         }
 
+    audit_row_id = introspection_data.get("audit_row_id")
+    if isinstance(audit_row_id, str):
+        context["audit_row_id"] = audit_row_id
+
+    consumed_receipt = introspection_data.get("consumed_receipt")
+    if consumed_receipt is None and "consumed_receipt" in introspection_data:
+        context["consumed_receipt"] = None
+    elif (
+        isinstance(consumed_receipt, dict)
+        and isinstance(consumed_receipt.get("consumed_at"), str)
+        and isinstance(consumed_receipt.get("connection_id"), str)
+    ):
+        context["consumed_receipt"] = {
+            "consumed_at": consumed_receipt["consumed_at"],
+            "connection_id": consumed_receipt["connection_id"],
+            "chain_seq": consumed_receipt.get("chain_seq") if isinstance(consumed_receipt.get("chain_seq"), int) else None,
+            "row_hash": consumed_receipt.get("row_hash") if isinstance(consumed_receipt.get("row_hash"), str) else None,
+        }
+
     if request is not None:
         try:
             cache = getattr(request.state, "_agentadmit_ctx_cache", None)
@@ -725,7 +817,7 @@ def _finish_scope_check(agent_ctx: dict, scope: str) -> dict:
     return agent_ctx
 
 
-def require_scope(scope: str, action_summary: Optional[Callable] = None):
+def require_scope(scope: str, action_summary: Optional[Callable] = None, report_outcome: bool = False):
     """
     FastAPI dependency factory. Checks the agent's granted scopes include
     the required scope, then logs access.
@@ -751,6 +843,7 @@ def require_scope(scope: str, action_summary: Optional[Callable] = None):
         async def confirming_scope_checker(
             credentials: HTTPAuthorizationCredentials = Depends(security),
             request: Request = None,
+            response: Response = None,
         ) -> dict:
             raw = b""
             body = None
@@ -781,13 +874,17 @@ def require_scope(scope: str, action_summary: Optional[Callable] = None):
                 request_digest=request_digest_for(raw),
                 action_summary=summary,
             )
-            return _finish_scope_check(agent_ctx, scope)
+            agent_ctx = _finish_scope_check(agent_ctx, scope)
+            if report_outcome:
+                _mark_outcome_report(request, agent_ctx.get("audit_row_id"))
+            return agent_ctx
 
         return confirming_scope_checker
 
     def scope_checker(
         credentials: HTTPAuthorizationCredentials = Depends(security),
         request: Request = None,
+        response: Response = None,
     ) -> dict:
         # The verify call carries scope_used=scope (1.10.0 telemetry) — the
         # hosted service records the exercised scope and refuses ungranted
@@ -807,6 +904,8 @@ def require_scope(scope: str, action_summary: Optional[Callable] = None):
             )
 
         log_agent_access(agent_ctx=agent_ctx, scope_used=scope)
+        if report_outcome:
+            _mark_outcome_report(request, agent_ctx.get("audit_row_id"))
         return agent_ctx
 
     return scope_checker

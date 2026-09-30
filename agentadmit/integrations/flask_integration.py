@@ -24,9 +24,9 @@ from datetime import datetime
 from typing import Callable, Optional
 
 import httpx
-from flask import Blueprint, Flask, g, jsonify, request
+from flask import Blueprint, Flask, g, jsonify, make_response, request
 
-from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _request_attestation, presence_verified
+from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _report_outcome_from_status, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options, get_tier_limits
 from agentadmit.models import AppAttestedPresence
 from agentadmit.storage import create_storage, StorageBackend
@@ -238,7 +238,7 @@ class AgentAdmitFlask:
                 return {"auth_type": "user", "user": user, "scopes": ["*"], "connection": None}
             return None
 
-    def require_scope(self, scope: str):
+    def require_scope(self, scope: str, report_outcome: bool = False):
         """Decorator: require a specific scope (agent-only endpoints)."""
         def decorator(f):
             @functools.wraps(f)
@@ -271,7 +271,10 @@ class AgentAdmitFlask:
 
                 self._log_access(ctx, scope)
                 g.agent_ctx = ctx
-                return f(*args, **kwargs)
+                response = make_response(f(*args, **kwargs))
+                if report_outcome:
+                    _report_outcome_from_status(ctx.get("audit_row_id"), response.status_code)
+                return response
             return wrapped
         return decorator
 
@@ -315,7 +318,7 @@ class AgentAdmitFlask:
             return wrapped
         return decorator
 
-    def require_scope_if_agent(self, scope: str):
+    def require_scope_if_agent(self, scope: str, report_outcome: bool = False):
         """Decorator: enforce scope only if caller is an agent. Pass through for regular users."""
         def decorator(f):
             @functools.wraps(f)
@@ -347,7 +350,10 @@ class AgentAdmitFlask:
 
                 self._log_access(ctx, scope)
                 g.agent_ctx = ctx
-                return f(*args, **kwargs)
+                response = make_response(f(*args, **kwargs))
+                if report_outcome:
+                    _report_outcome_from_status(ctx.get("audit_row_id"), response.status_code)
+                return response
             return wrapped
         return decorator
 

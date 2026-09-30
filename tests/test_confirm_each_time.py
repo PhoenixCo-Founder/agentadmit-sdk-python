@@ -21,6 +21,7 @@ from agentadmit.auth import (
     ACTION_ATTESTATION_HEADER,
     _active_refusal_payload,
     parse_action_confirmation,
+    report_outcome,
     request_digest_for,
     require_scope,
 )
@@ -44,6 +45,7 @@ def _fake_config():
     return SimpleNamespace(
         app_id="app_test",
         api_key="aa_test_key",
+        agentadmit_api_url="https://agentadmit.example",
         agentadmit_verify_url="https://agentadmit.example/api/v1/verify",
         token_prefix_access="ag_at_",
         user_lookup_field="user_id",
@@ -214,6 +216,104 @@ def test_malformed_action_confirmation_is_dropped(monkeypatch):
 
     res = TestClient(app).get("/api/x", headers={"Authorization": "Bearer ag_at_x"})
     assert res.status_code == 200 and res.json()["has"] is False
+
+
+def test_success_context_carries_audit_row_and_consumed_receipt(monkeypatch):
+    capture: dict = {}
+    _patch(monkeypatch, {
+        "active": True,
+        "user_id": "u1",
+        "connection_id": "c1",
+        "scopes": ["read:x"],
+        "audit_row_id": "11111111-1111-4111-8111-111111111111",
+        "consumed_receipt": {
+            "consumed_at": "2026-09-30T02:54:07.000Z",
+            "connection_id": "conn_123",
+            "chain_seq": None,
+            "row_hash": None,
+        },
+    }, capture)
+    app = FastAPI()
+
+    @app.get("/api/x")
+    async def get_x(agent_ctx=Depends(require_scope("read:x"))):
+        return {
+            "audit_row_id": agent_ctx.get("audit_row_id"),
+            "consumed_receipt": agent_ctx.get("consumed_receipt"),
+        }
+
+    res = TestClient(app).get("/api/x", headers={"Authorization": "Bearer ag_at_x"})
+    assert res.status_code == 200
+    assert res.json()["audit_row_id"] == "11111111-1111-4111-8111-111111111111"
+    assert res.json()["consumed_receipt"]["connection_id"] == "conn_123"
+
+
+def test_report_outcome_posts_exact_status_class(monkeypatch):
+    monkeypatch.setattr(auth_mod, "get_config", _fake_config)
+    captured = {}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return httpx.Response(201, json={
+            "outcome_row_id": "22222222-2222-4222-8222-222222222222",
+            "outcome": "executed",
+            "status_class": "2xx",
+            "chain_seq": 10,
+            "row_hash": "abc",
+            "reported_at": "2026-09-30T03:00:00.000Z",
+        }, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(auth_mod.httpx, "post", fake_post)
+    result = report_outcome("11111111-1111-4111-8111-111111111111", "executed", "2xx")
+    assert captured["url"].endswith("/api/v1/audit/11111111-1111-4111-8111-111111111111/outcome")
+    assert captured["json"] == {"outcome": "executed", "status_class": "2xx"}
+    assert result["outcome_row_id"] == "22222222-2222-4222-8222-222222222222"
+
+
+def test_fastapi_outcome_reporting_uses_final_response_status(monkeypatch):
+    from starlette.responses import JSONResponse
+    from agentadmit import middleware as middleware_mod
+    from agentadmit.middleware import AgentAdmitMiddleware
+
+    config = _fake_config()
+    config.scopes = []
+    config.app_name = "Test App"
+    monkeypatch.setattr(auth_mod, "get_config", lambda: config)
+    monkeypatch.setattr(auth_mod, "_get_storage", lambda: MemoryStorage())
+    monkeypatch.setattr(middleware_mod, "load_config", lambda _path: config)
+    monkeypatch.setattr(middleware_mod, "create_storage", lambda _config: MemoryStorage())
+
+    captured = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        if url.endswith("/api/v1/verify"):
+            return httpx.Response(200, json={
+                "active": True,
+                "user_id": "u1",
+                "connection_id": "c1",
+                "scopes": ["write:x"],
+                "audit_row_id": "11111111-1111-4111-8111-111111111111",
+            }, request=httpx.Request("POST", url))
+        captured.append(json)
+        return httpx.Response(201, json={
+            "outcome_row_id": "22222222-2222-4222-8222-222222222222",
+            "outcome": json["outcome"],
+            "status_class": json["status_class"],
+        }, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(auth_mod.httpx, "post", fake_post)
+
+    app = FastAPI()
+    app.add_middleware(AgentAdmitMiddleware, config_path="agentadmit.yaml", sync_scopes=False)
+
+    @app.post("/api/x")
+    async def write_x(agent_ctx=Depends(require_scope("write:x", report_outcome=True))):
+        return JSONResponse({"ok": False}, status_code=503)
+
+    res = TestClient(app).post("/api/x", headers={"Authorization": "Bearer ag_at_x"})
+    assert res.status_code == 503
+    assert captured == [{"outcome": "failed", "status_class": "5xx"}]
 
 
 def test_get_agentadmit_user_accepts_custom_gate_telemetry(monkeypatch):
