@@ -440,6 +440,8 @@ typed a name that is not on your list. On the typed `VerifyResponse` model
 both fields are `Optional[dict]` and default to `None`. The strict readers
 are exported as `parse_designated_agent` and `parse_agent_reported`.
 
+If agents redeem connection tokens through your app's `/token` route (FastAPI, Flask or Django), the route passes `agent_platform` and `agent_model` along to the hosted exchange when the agent sends them (since 1.14.1).
+
 Do not branch authorization on either field. They are records for people
 reviewing a connection, not a gate. Scope checks, connection status, and
 consent verdicts remain the only decision inputs. To act on a designation,

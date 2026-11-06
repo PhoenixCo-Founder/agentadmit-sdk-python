@@ -602,7 +602,7 @@ def token_exchange_view(request):
     # rejects explicit JSON nulls ("Expected string, received null"). Parity
     # with the FastAPI router's v1.1.0 fix.
     exchange_payload = {"token": connection_token}
-    for field in ("agent_label", "agent_id", "agent_metadata"):
+    for field in ("agent_label", "agent_id", "agent_metadata", "agent_platform", "agent_model"):
         if data.get(field) is not None:
             exchange_payload[field] = data[field]
 

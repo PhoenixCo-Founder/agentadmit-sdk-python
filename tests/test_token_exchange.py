@@ -97,6 +97,50 @@ def test_exchange_forwards_provided_optional_fields(exchange_app):
     }
 
 
+def test_exchange_forwards_what_the_agent_says_it_runs_on(exchange_app):
+    client, token_path, captured = exchange_app
+    resp = client.post(token_path, json={
+        "grant_type": "connection_token",
+        "connection_token": "ag_ct_abc",
+        "agent_label": "My Agent",
+        "agent_platform": "ExampleAgent 2.1",
+        "agent_model": {"id": "example-model", "version": "2026-01"},
+    })
+    assert resp.status_code == 200
+    assert captured["json"] == {
+        "token": "ag_ct_abc",
+        "agent_label": "My Agent",
+        "agent_platform": "ExampleAgent 2.1",
+        "agent_model": {"id": "example-model", "version": "2026-01"},
+    }
+
+
+def test_exchange_never_rejects_a_malformed_self_report(exchange_app):
+    # The hosted service owns the format and leaves out what does not fit;
+    # the router must not turn a malformed self-report into a 422.
+    client, token_path, captured = exchange_app
+    resp = client.post(token_path, json={
+        "grant_type": "connection_token",
+        "connection_token": "ag_ct_abc",
+        "agent_platform": 42,
+        "agent_model": "claude",
+    })
+    assert resp.status_code == 200
+    assert captured["json"]["token"] == "ag_ct_abc"
+
+
+def test_exchange_omits_null_self_report(exchange_app):
+    client, token_path, captured = exchange_app
+    resp = client.post(token_path, json={
+        "grant_type": "connection_token",
+        "connection_token": "ag_ct_abc",
+        "agent_platform": None,
+        "agent_model": None,
+    })
+    assert resp.status_code == 200
+    assert captured["json"] == {"token": "ag_ct_abc"}
+
+
 def test_version_not_stale():
     # The published 1.1.0 wheel reported "0.1.0" — version must now come
     # from package metadata (one bump in pyproject.toml covers everything).

@@ -107,6 +107,23 @@ def test_exchange_omits_absent_optional_fields(aa_app, monkeypatch):
     assert captured["json"] == {"token": "ag_ct_abc"}
     assert None not in captured["json"].values()
 
+    # What the agent says it runs on is forwarded when present (1.14.1).
+    resp = client.post(
+        f"{aa.config.route_prefix}/token",
+        json={
+            "grant_type": "connection_token",
+            "connection_token": "ag_ct_abc",
+            "agent_platform": "ExampleAgent 2.1",
+            "agent_model": {"id": "example-model", "version": "2026-01"},
+        },
+    )
+    assert resp.status_code == 200
+    assert captured["json"] == {
+        "token": "ag_ct_abc",
+        "agent_platform": "ExampleAgent 2.1",
+        "agent_model": {"id": "example-model", "version": "2026-01"},
+    }
+
 
 def test_generate_token_stores_local_connection(aa_app, monkeypatch):
     aa, client = aa_app
