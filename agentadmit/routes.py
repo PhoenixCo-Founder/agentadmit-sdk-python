@@ -393,6 +393,13 @@ def create_agentadmit_router(
             payload["agent_id"] = body.agent_id
         if body.agent_metadata is not None:
             payload["agent_metadata"] = body.agent_metadata
+        # What the agent says it runs on (1.14.1). Reported by the agent,
+        # unverified; the hosted service records it and never lets it decide
+        # the outcome of the exchange.
+        if body.agent_platform is not None:
+            payload["agent_platform"] = body.agent_platform
+        if body.agent_model is not None:
+            payload["agent_model"] = body.agent_model
 
         resp = _call_hosted_service("POST", "/api/v1/exchange", json=payload,
                                     authenticated=False)

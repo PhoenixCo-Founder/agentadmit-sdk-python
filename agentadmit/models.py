@@ -253,6 +253,11 @@ class TokenExchangeRequest(BaseModel):
     agent_id: Optional[str] = Field(None, description="Agent identifier (e.g., 'my-assistant-v1')")
     agent_label: Optional[str] = Field(None, description="Human-readable agent name (e.g., 'MyAssistant')")
     agent_metadata: Optional[dict[str, Any]] = Field(None, description="Optional agent metadata")
+    # What the agent says it runs on (1.14.1). Typed loosely on purpose: the
+    # hosted service owns the format and leaves out a value that does not fit,
+    # so a malformed self-report never fails the exchange here either.
+    agent_platform: Optional[Any] = Field(None, description="Agent app or runtime the agent says it runs in (reported by the agent, unverified)")
+    agent_model: Optional[Any] = Field(None, description="AI model the agent says it runs on: {id, version} (reported by the agent, unverified)")
 
 
 class TokenExchangeResponse(BaseModel):
