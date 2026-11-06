@@ -407,6 +407,45 @@ if result.user_intent:
     show_in_review_ui(result.user_intent)  # display/audit only — never an access decision
 ```
 
+## Agent Designation
+
+On AgentAdmit's consent page the user says which agent app a connection is
+for and, optionally, which AI model family it mainly uses. That is the user's
+statement, recorded with the grant; it is not a verified identity of the
+agent. Separately, an agent may report its own platform and model when it
+redeems the connection token; that is unverified too.
+
+On verification, both appear on the agent context when the platform returns
+them: `auth_ctx["designated_agent"]` and `auth_ctx["agent_reported"]`. The
+keys are absent on connections without one. It works the same with FastAPI,
+Flask, and Django:
+
+```python
+from fastapi import Depends
+from agentadmit import require_scope
+
+@app.get("/api/flights")
+def flights(auth_ctx: dict = Depends(require_scope("read:flights"))):
+    # {"agent_id", "name", "source": "user_declared", "model": {"model_id", "name"} | None}
+    named = auth_ctx.get("designated_agent")
+    # {"platform", "model": {"id", "version"} | None}
+    reported = auth_ctx.get("agent_reported")
+    ...
+```
+
+Use `designated_agent["name"]` when you tell a user which of their
+connections did something: it is the name they chose. `agent_id` and
+`model["model_id"]` are the ids of your list entries, or `None` when the user
+typed a name that is not on your list. On the typed `VerifyResponse` model
+both fields are `Optional[dict]` and default to `None`. The strict readers
+are exported as `parse_designated_agent` and `parse_agent_reported`.
+
+Do not branch authorization on either field. They are records for people
+reviewing a connection, not a gate. Scope checks, connection status, and
+consent verdicts remain the only decision inputs. To act on a designation,
+use the hosted revoke API (`designated_agent_id`, `designated_model_id`) or
+your list's block setting in the dashboard.
+
 ## Per-Call Audit Telemetry
 
 Since 1.10.0, every verification call reports what the call actually did, so the

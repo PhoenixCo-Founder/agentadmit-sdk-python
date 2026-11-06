@@ -68,6 +68,26 @@ class VerifyResponse(BaseModel):
     )
     consent: Optional[dict[str, Any]] = Field(None, description="Consent Ledger verdict, when the platform returns it.")
     presence: Optional[dict[str, Any]] = Field(None, description="Human-presence fact (WebAuthn step-up), when the platform returns it.")
+    designated_agent: Optional[dict[str, Any]] = Field(
+        None,
+        description=(
+            "The agent app (and, when named, the AI model family) the USER "
+            "said this connection is for on the consent page: {agent_id, "
+            "name, source: 'user_declared', model}. Declared by the user; "
+            "not a verified identity of the agent. Review-time record only, "
+            "never an enforcement input. Null/absent on older servers and on "
+            "connections without a designation."
+        ),
+    )
+    agent_reported: Optional[dict[str, Any]] = Field(
+        None,
+        description=(
+            "What the AGENT reported about itself when it redeemed the "
+            "connection token: {platform, model: {id, version}}. Unverified. "
+            "Review-time record only, never an enforcement input. "
+            "Null/absent when it reported neither."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
