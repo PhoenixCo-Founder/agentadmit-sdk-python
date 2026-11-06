@@ -43,7 +43,7 @@ from django.http import JsonResponse
 from django.urls import path
 from django.conf import settings
 
-from agentadmit.auth import _active_refusal_payload, _introspect_with_retry, _report_outcome_from_status, _request_attestation, presence_verified
+from agentadmit.auth import _active_refusal_payload, _attach_agent_designation, _introspect_with_retry, _report_outcome_from_status, _request_attestation, presence_verified
 from agentadmit.config import load_config, get_config, get_scope_metadata, get_duration_options
 from agentadmit.exceptions import IntrospectionUnavailableError, RateLimitError, VerifyRefusedError, verify_refused_error
 from agentadmit.models import AppAttestedPresence
@@ -227,6 +227,10 @@ def _validate_agent_token(token: str, request=None, scope_used: Optional[str] = 
     user_intent = data.get("user_intent")
     if isinstance(user_intent, str):
         context["user_intent"] = user_intent
+
+    # Agent designation (1.14.0): who the user named, and what the agent
+    # reported about itself. Review-time records only.
+    _attach_agent_designation(context, data)
 
     return context
 

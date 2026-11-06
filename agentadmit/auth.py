@@ -437,6 +437,73 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
     }
 
 
+def parse_designated_agent(raw) -> Optional[dict]:
+    """Strict reader for the verify response's ``designated_agent`` (1.14.0).
+
+    The agent app (and, when named, the AI model family) the USER said a
+    connection is for on the consent page. Declared by the user; not a
+    verified identity of the agent. Only a dict with a non-empty string name
+    and source ``user_declared`` is accepted; anything else is treated as
+    absent, never coerced. A malformed model is dropped and the app is kept.
+    """
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name or raw.get("source") != "user_declared":
+        return None
+    model = raw.get("model")
+    model_out = None
+    if isinstance(model, dict) and isinstance(model.get("name"), str) and model["name"]:
+        model_id = model.get("model_id")
+        model_out = {"model_id": model_id if isinstance(model_id, str) else None, "name": model["name"]}
+    agent_id = raw.get("agent_id")
+    return {
+        "agent_id": agent_id if isinstance(agent_id, str) else None,
+        "name": name,
+        "source": "user_declared",
+        "model": model_out,
+    }
+
+
+def parse_agent_reported(raw) -> Optional[dict]:
+    """Strict reader for the verify response's ``agent_reported`` (1.14.0).
+
+    What the AGENT reported about itself when it redeemed the connection
+    token. Unverified. Returns None when the block carries neither a string
+    platform nor a model with a string id.
+    """
+    if not isinstance(raw, dict):
+        return None
+    platform = raw.get("platform")
+    platform = platform if isinstance(platform, str) and platform else None
+    model = raw.get("model")
+    model_out = None
+    if isinstance(model, dict) and isinstance(model.get("id"), str) and model["id"]:
+        version = model.get("version")
+        model_out = {"id": model["id"], "version": version if isinstance(version, str) else None}
+    if platform is None and model_out is None:
+        return None
+    return {"platform": platform, "model": model_out}
+
+
+def _attach_agent_designation(context: dict, data: dict) -> None:
+    """Agent designation rides along when the platform returns it (additive).
+
+    ``designated_agent`` is who the USER said the connection is for;
+    ``agent_reported`` is what the agent said about itself at exchange.
+    Review-time records only, never an enforcement input; authorization
+    decisions ride scopes, connection status, and consent. Absent on older
+    servers and on connections without one; malformed values are dropped
+    without failing the verify result.
+    """
+    designated = parse_designated_agent(data.get("designated_agent"))
+    if designated is not None:
+        context["designated_agent"] = designated
+    reported = parse_agent_reported(data.get("agent_reported"))
+    if reported is not None:
+        context["agent_reported"] = reported
+
+
 def parse_action_decline(raw) -> Optional[dict]:
     """Strictly typed copy of the wire ``declined`` block, or None."""
     if not isinstance(raw, dict):
@@ -724,6 +791,8 @@ def _authenticate_agent(
     user_intent = introspection_data.get("user_intent")
     if isinstance(user_intent, str):
         context["user_intent"] = user_intent
+
+    _attach_agent_designation(context, introspection_data)
 
     # Confirm-each-time (1.11.0): present only when THIS call was accepted
     # because the hosted service consumed a human confirmation for exactly
