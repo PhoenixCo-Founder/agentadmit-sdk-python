@@ -563,6 +563,79 @@ Notes:
 - Confirmation only applies when the call declares the exercised scope, which
   `require_scope` always does.
 
+### Confirm each time: when the user has no passkey yet
+
+A confirmation needs a passkey the user already has for your app. A user who
+granted before you marked the scope `confirm_each_time`, or whose passkeys you
+removed, has none, and the link the agent holds cannot be used alone. The
+hosted service says so on the refusal: `confirmation["enrollment_required"]`
+is `True`, and the SDK tells the agent to ask the user to open the request from
+inside your app. `False` means a passkey is on file. The key is left out of the
+typed `confirmation` dict when the hosted service did not state it; any wire
+value other than `true` or `false` is treated the same way.
+
+The 403 body in that case (FastAPI's `HTTPException` detail; Flask and Django
+return the same body):
+
+```json
+{
+  "error": "confirmation_required",
+  "error_description": "This action requires a fresh human confirmation, and this user has no passkey on file for the app yet, so the confirmation link alone cannot be used. Ask the user to open the request from inside the app. After they confirm, retry with the X-AgentAdmit-Action-Attestation header.",
+  "confirmation": {
+    "action_session_id": "asess_...",
+    "action_session_url": "https://agentadmit.com/confirm/action/asess_...",
+    "enrollment_required": true,
+    "expires_at": "2026-11-20T18:30:00.000Z",
+    "scope": "write:payments",
+    "method": "POST",
+    "endpoint": "/api/payments",
+    "request_digest": "sha256:...",
+    "summary": "Pay Alex $50"
+  }
+}
+```
+
+Your app then opens the confirmation for its own signed-in user with
+`create_owner_link(action_session_id, app_user_id)` and sends that user to
+`owner_session_url`. On that page the user creates a passkey and confirms the
+action; on a computer the page can show a QR code to continue on the user's
+phone. When a passkey is already on file the result has
+`enrollment_required: false` and the URL is the ordinary confirmation page.
+
+```python
+from fastapi import Depends
+from fastapi.responses import RedirectResponse
+from agentadmit import create_owner_link
+
+# A route your signed-in user uses (your own session auth), not an agent route.
+@app.post("/account/pending-confirmations/{action_session_id}/open")
+def open_pending_confirmation(action_session_id: str, user=Depends(current_signed_in_user)):
+    link = create_owner_link(action_session_id, user.id)
+    return RedirectResponse(link["owner_session_url"], status_code=303)
+```
+
+Two rules:
+
+- Call `create_owner_link` only from a route your signed-in human uses, and pass
+  that user's id. The hosted service answers `404 not_found` when the
+  confirmation belongs to another user, another app, or the other environment.
+- Do not return `owner_session_url` to an agent, and do not log it. Whoever opens
+  it can create the passkey that confirms the action.
+
+The SDK does not mount this on its router. A bad argument raises `ValueError`
+before any request. Hosted errors raise `OwnerLinkError` with `.status` and the
+hosted `.code` (`invalid_api_key`, `api_key_not_app_linked`, `not_found`,
+`already_consumed`, `already_verified`, `session_expired`); the call does not
+retry on a 4xx. Calling it again is safe: a new link replaces the previous
+one.
+
+Webhook: when your app removes a user's passkeys through the API, AgentAdmit
+sends a signed `agentadmit.passkey_removed` event to your webhook URL, and
+`verify_webhook_signature` verifies it the same way as every other delivery. The
+event carries `removal_id` and, under `data`, `app_user_id`, `credential_ids`,
+`removed`, `remaining`, `wait_sec`, `removed_at`, `reenrollment_not_before` and
+`removed_by`.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Python SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter - no changes needed in your app code.

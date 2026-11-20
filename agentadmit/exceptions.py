@@ -147,6 +147,22 @@ class ConfirmationDeclinedError(VerifyRefusedError):
         self.attestation_status = attestation_status
 
 
+class OwnerLinkError(AgentAdmitError):
+    """The owner-link call failed (1.15.0).
+
+    ``status`` is the HTTP status the hosted service answered and ``code`` its
+    ``error`` code (``invalid_api_key``, ``api_key_not_app_linked``,
+    ``not_found``, ``already_consumed``, ``already_verified``,
+    ``session_expired``, ...), or None for a malformed success body. The
+    message never carries the owner link.
+    """
+
+    def __init__(self, message: str, status: int, code: Optional[str] = None):
+        self.status = status
+        self.code = code
+        super().__init__(message)
+
+
 def verify_refused_error(payload: dict) -> VerifyRefusedError:
     """Build the typed refusal for an ``_active_refusal_payload`` result.
 

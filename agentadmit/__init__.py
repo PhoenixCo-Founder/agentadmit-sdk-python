@@ -35,6 +35,7 @@ from agentadmit.auth import (
     parse_designated_agent,
     parse_agent_reported,
     ACTION_ATTESTATION_HEADER,
+    ENROLLMENT_REQUIRED_DESCRIPTION,
 )
 from agentadmit.routes import create_agentadmit_router
 # keys.py is deprecated — AgentAdmit is a hosted service, no local keys needed
@@ -44,6 +45,7 @@ from agentadmit.alerts import (
     get_alert_config,
     ALERT_TYPES,
 )
+from agentadmit.owner_link import create_owner_link
 from agentadmit.consent import check_consent, CALLER_CLASSES
 from agentadmit.callerconsent import caller_consent, classify_caller
 from agentadmit.models import VERIFY_ERROR_CODES, AppAttestedPresence, VerifyResponse
@@ -62,6 +64,7 @@ from agentadmit.exceptions import (
     VerifyRefusedError,
     ConfirmationRequiredError,
     ConfirmationDeclinedError,
+    OwnerLinkError,
 )
 
 __all__ = [
@@ -94,6 +97,10 @@ __all__ = [
     "parse_designated_agent",
     "parse_agent_reported",
     "ACTION_ATTESTATION_HEADER",
+    "ENROLLMENT_REQUIRED_DESCRIPTION",
+
+    # Owner link for a pending confirmation (1.15.0)
+    "create_owner_link",
 
     # Alerts API
     "configure_alerts",
@@ -120,4 +127,5 @@ __all__ = [
     "VerifyRefusedError",
     "ConfirmationRequiredError",
     "ConfirmationDeclinedError",
+    "OwnerLinkError",
 ]
