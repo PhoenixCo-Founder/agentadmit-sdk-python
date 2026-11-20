@@ -389,6 +389,7 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
         # Confirm-each-time (1.11.0): the scope is granted but THIS call needs
         # a fresh human confirmation. Pass the staged ceremony through so the
         # agent can hand the link to the human; nothing else from the wire.
+        confirmation = parse_action_confirmation(data.get("confirmation"))
         payload = {
             "error": "confirmation_required",
             "error_description": data.get(
@@ -397,7 +398,10 @@ def _active_refusal_payload(data: dict, scope_used: Optional[str]) -> Optional[d
                 "link to the user, then retry with the X-AgentAdmit-Action-Attestation header.",
             ),
         }
-        confirmation = parse_action_confirmation(data.get("confirmation"))
+        # 1.15.0: when the user has no passkey yet, the link alone cannot be
+        # used; the agent is told to send the user into the app instead.
+        if confirmation is not None and confirmation.get("enrollment_required") is True:
+            payload["error_description"] = ENROLLMENT_REQUIRED_DESCRIPTION
         if confirmation is not None:
             payload["confirmation"] = confirmation
         if isinstance(data.get("attestation_status"), str):
@@ -527,8 +531,22 @@ def parse_action_decline(raw) -> Optional[dict]:
     }
 
 
+#: What the agent is told when the confirmation needs a passkey the user has
+#: not created yet (1.15.0): the confirmation link alone cannot be used.
+ENROLLMENT_REQUIRED_DESCRIPTION = (
+    "This action requires a fresh human confirmation, and this user has no passkey "
+    "on file for the app yet, so the confirmation link alone cannot be used. Ask the "
+    "user to open the request from inside the app. After they confirm, retry with the "
+    "X-AgentAdmit-Action-Attestation header."
+)
+
+
 def parse_action_confirmation(raw) -> Optional[dict]:
-    """Strictly typed copy of the wire ``confirmation`` block, or None."""
+    """Strictly typed copy of the wire ``confirmation`` block, or None.
+
+    ``enrollment_required`` (1.15.0) is present only when the wire value is a
+    bool; any other value is treated as if the key were missing.
+    """
     if not isinstance(raw, dict):
         return None
     for key in ("action_session_id", "action_session_url", "expires_at", "scope"):
@@ -538,7 +556,7 @@ def parse_action_confirmation(raw) -> Optional[dict]:
     def nullable(value):
         return value if isinstance(value, str) else None
 
-    return {
+    confirmation = {
         "action_session_id": raw["action_session_id"],
         "action_session_url": raw["action_session_url"],
         "expires_at": raw["expires_at"],
@@ -548,6 +566,10 @@ def parse_action_confirmation(raw) -> Optional[dict]:
         "request_digest": nullable(raw.get("request_digest")),
         "summary": nullable(raw.get("summary")),
     }
+    # isinstance(1, bool) is False, so 1/0 are not taken for True/False.
+    if isinstance(raw.get("enrollment_required"), bool):
+        confirmation["enrollment_required"] = raw["enrollment_required"]
+    return confirmation
 
 
 # ---------------------------------------------------------------------------
